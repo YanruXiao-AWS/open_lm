@@ -414,7 +414,11 @@ def main(args):
                 logging.info(f"No latest resume checkpoint found in {checkpoint_path}.")
         if args.distributed:
             # sync found checkpoint path to all ranks
-            resume_from = broadcast_object(args, resume_from)
+            if args.dist_backend=="xla":
+                # For testing
+                resume_from = broadcast_object(args, resume_from)
+            else:
+                resume_from = broadcast_object(args, resume_from)
         args.resume = resume_from
 
     if args.copy_codebase:
@@ -576,7 +580,11 @@ def main(args):
             if args.ddp_static_graph:
                 # this doesn't exist in older PyTorch, arg only added if enabled
                 ddp_args["static_graph"] = True
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
+            if args.dist_backend=="xla":
+                model = model # skip
+            else:
+                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
+            
     if args.averagers is not None:
         averagers = ModelAverager(model, args.averagers)
     if args.resume is not None and averagers is not None:
@@ -821,6 +829,18 @@ def main(args):
             data["train"] = get_wds_dataset(
                 args, True, epoch, force_num_samples=num_samples_per_source, data_key=args.data_key, floor=True
             )
+            
+        if args.dist_backend=="xla":
+            import torch_xla.core.xla_model as xm
+            import torch_xla.distributed.parallel_loader as pl
+            class MpDeviceLoader(pl.MpDeviceLoader):
+                def num_batches(self):
+                    return self._loader.num_batches
+                def num_samples(self):
+                    return self._loader.num_samples
+            data["train"].dataloader = MpDeviceLoader(data["train"].dataloader, device)
+            xm.rendezvous("wait_for_everyone_to_reach")
+            print("Step up XLA dataloader", "x"*100)
 
         prev_step = global_step
         if is_master(args):

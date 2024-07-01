@@ -62,7 +62,8 @@ def init_distributed_device(args):
         import torch_xla.core.xla_model as xm
         import torch_xla.distributed.xla_backend
         os.environ['XLA_USE_BF16'] = '1' 
-        os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --no_cache' + ' --log_level=ERROR' + ' -O1'
+        # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --no_cache' + ' --log_level=ERROR' + ' -O1'
+        os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR'  + ' -O1'
     # For testing, allow forcing distributed mode to test distributed code path even on one gpu.
     if is_using_distributed() or args.force_distributed:
         if "SLURM_PROCID" in os.environ:
@@ -94,10 +95,16 @@ def init_distributed_device(args):
             args.world_group = torch.distributed.init_process_group(
                 backend=args.dist_backend, init_method=args.dist_url
             )
-            args.world_size = torch.distributed.get_world_size()
-            args.rank = torch.distributed.get_rank()
+            if args.dist_backend=="xla":
+                args.world_size = xm.xrt_world_size()
+                args.rank = xm.get_ordinal()
+                print("args.rank: ", args.rank)
+            else:
+                args.world_size = torch.distributed.get_world_size()
+                args.rank = torch.distributed.get_rank()
+                print("args.rank2: ", args.rank)
         args.distributed = True
-
+    print("args.rank -- not distributed:", args.rank)
     if torch.cuda.is_available():
         if args.distributed and not args.no_set_device_rank:
             device = "cuda:%d" % args.local_rank
@@ -116,8 +123,10 @@ def init_distributed_device(args):
 def broadcast_object(args, obj, src=0):
     if args.rank == src:
         objects = [obj]
+        print("obj src"+"#"*100)
     else:
         objects = [None]
+        print("obj NONE "+"#"*100)
     dist.broadcast_object_list(objects, src=src)
     return objects[0]
 

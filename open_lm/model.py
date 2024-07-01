@@ -9,7 +9,8 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.checkpoint import checkpoint
+from torch.utils.checkpoint import checkpoint # comment for xla - testing
+# from torch_xla.utils.checkpoint import checkpoint # added from xla only
 
 import xformers.ops as xops
 
@@ -92,7 +93,7 @@ def _rescan_model_configs(model_config_paths=None):
 
 _rescan_model_configs()  # initial populate of model config registry
 
-
+import torch_xla.core.xla_model as xm # Test only
 # args and default params follow llama (except with LayerNorm instead of RmsNorm)
 @dataclass
 class Params:
@@ -106,7 +107,7 @@ class Params:
     weight_tying: bool = False
     norm_type: nn.Module = te.LayerNorm if using_te else nn.LayerNorm
     linear_type: nn.Module = LinearTE if using_te else nn.Linear
-    te_device: str = "cuda" if using_te else "xla"
+    te_device: str = "cuda" if using_te else xm.xla_device()
     attn_func: Callable = xformers_attn if torch.cuda.is_available() else torch_attn
     apply_qk_norm: bool = False
     moe_loss_weight: float = 0.1
@@ -144,7 +145,6 @@ class CustomAttn(nn.Module):
         self.pos_embed = get_pos_embed(args)
         self.attn_fn = args.attn_func
         self.apply_qk_norm = args.apply_qk_norm
-
         # initialize norm layers for queries and keys if needed
         self.q_norm = (
             args.norm_type(
@@ -172,10 +172,24 @@ class CustomAttn(nn.Module):
     def reset_parameters(self):
         # initialize weights by trunc_normal(1/sqrt(fan_in))
         std = 1.0 / math.sqrt(self.dim)
-        torch.nn.init.trunc_normal_(self.in_proj.weight, std=std, a=-3 * std, b=3 * std)
+        # print("in_proj before:", self.in_proj.__dict__, "aab"*30)
+        # torch.nn.init.trunc_normal_(self.in_proj.weight, std=std, a=-3 * std, b=3 * std)
+        # print("in_proj after:", self.in_proj.__dict__, "ccd"*30)
+        
+        # To fix the bug
+        # self.in_proj.weight = torch.clamp(torch.nn.init.normal_(self.in_proj.weight, std=std), -3 * std, 3 * std)
+        torch.nn.init.normal_(self.in_proj.weight, std=std)
+        
+        
         # scale init by depth as in https://arxiv.org/abs/1908.11365 -- worked slightly better.
         std = std / math.sqrt(2 * (self.layer_id + 1))
-        torch.nn.init.trunc_normal_(self.out_proj.weight, std=std, a=-3 * std, b=3 * std)
+        # torch.nn.init.trunc_normal_(self.out_proj.weight, std=std, a=-3 * std, b=3 * std)
+        
+        
+        # To temp fix the bug , still
+        print("Temp fix -> check model.py")
+        # self.out_proj.weight = torch.clamp(torch.nn.init.normal_(self.out_proj.weight, std=std), -3 * std, 3 * std)
+        torch.nn.init.normal_(self.out_proj.weight, std=std)
 
     def forward(self, x: torch.Tensor, is_causal=True, past_key_value=None, use_cache=False, attention_mask=None):
         batchsize, q_len, _ = x.shape
@@ -250,7 +264,9 @@ class SwiGLUTorch(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args: Params = Params, bias=True):
         super().__init__()
         self.w12 = nn.Linear(in_dim, 2 * hidden_dim, bias=bias, device=args.te_device)
+        # self.w12 = nn.Linear(in_dim, 2 * hidden_dim, bias=bias)
         self.w3 = nn.Linear(hidden_dim, out_dim, bias=bias, device=args.te_device)
+        # self.w3 = nn.Linear(hidden_dim, out_dim, bias=bias)
 
     def forward(self, x):
         gate, x = self.w12(x).chunk(2, dim=-1)
@@ -428,6 +444,8 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             past_key_values = list(past_key_values)
         for i, layer in enumerate(self.layers):
             if self.grad_checkpointing:
+                if args.dist_backend=="xla":
+                    from torch_xla.utils.checkpoint import checkpoint # added from xla only
                 x, past_key_values[i] = checkpoint(layer, x, past_key_values[i], use_cache, attention_mask)
             else:
                 x, past_key_values[i] = layer(x, past_key_values[i], use_cache=use_cache, attention_mask=attention_mask)
@@ -471,6 +489,10 @@ def create_params(args):
             "seq_len": cfg["seq_len"],
         }
     else:
+        if args.dist_backend=="xla":
+            import torch_xla.core.xla_model as xm
+            print("using_te", using_te, "abc"*30)
+            print("args.use_fp8", args.use_fp8, "abc"*30)
         return Params(
             dim=cfg["hidden_dim"],
             n_layers=cfg["n_layers"],
@@ -481,7 +503,8 @@ def create_params(args):
             weight_tying=cfg["weight_tying"],
             norm_type=get_norm_class(cfg.get("model_norm", args.model_norm), args.use_fp8),
             linear_type=LinearTE if (using_te and args.use_fp8) else nn.Linear,
-            te_device="cuda" if (using_te and args.use_fp8) else "xla" if args.dist_backend=="xla" else None,
+            # te_device="cuda" if (using_te and args.use_fp8) else "xla" if args.dist_backend=="xla" else None,
+            te_device="cuda" if (using_te and args.use_fp8) else xm.xla_device() if args.dist_backend=="xla" else None,
             attn_func=get_attn_func(
                 args.attn_name,
                 args.attn_activation,
