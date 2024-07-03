@@ -290,7 +290,8 @@ class Block(nn.Module):
         elif args.ffn_type == "swiglu_torch":
             # this follows llama / lit llama -- go to multiple of 256
             self.hidden_dim = 256 * ((int(2 * 4 * args.dim / 3) + 256 - 1) // 256)
-            self.feed_forward = SwiGLUTorch(args.dim, self.hidden_dim, args.dim, args, bias=False)
+            # self.feed_forward = SwiGLUTorch(args.dim, self.hidden_dim, args.dim, args, bias=False)
+            self.feed_forward = SwiGLUTorch(args.dim, self.hidden_dim, args.dim, args, bias=True)
         elif args.ffn_type == "gelu":
             # Follows mosaic mpt7b, but without a bias.
             self.hidden_dim = args.dim * 4
