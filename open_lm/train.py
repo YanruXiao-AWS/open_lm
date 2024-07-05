@@ -168,7 +168,7 @@ def train_one_epoch(
             ) else autocast():
                 forward_start = time.time()
                 inputs, targets = sample_chunk(texts, args)
-                print("inputs", inputs, "#"*100)
+                # print("inputs", inputs, "#"*100)
                 out, _, _ = model(inputs)
                 # for name, param in model.named_parameters():
                 #     print("name: ", name, "has nan:", param.data.cpu().isnan().any())
@@ -178,25 +178,25 @@ def train_one_epoch(
                 #     #     print("name:", name,  "xx"*50)
                 #         # print("param:", param.data, "*"*100)
                 #     # break
-                print("out: ", out, "#"*100)
+                # print("out: ", out, "#"*100)
                 forward_time_m.update(time.time() - forward_start)
 
                 if args.log_logit_mean:
                     logit_m.update(torch.mean(out).item())
-                print("Out reshape", out.reshape(-1, args.vocab_size), "#"*100)
+                # print("Out reshape", out.reshape(-1, args.vocab_size), "#"*100)
                 total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
-                print("targets reshape", targets.reshape(-1), "#"*100)
+                # print("targets reshape", targets.reshape(-1), "#"*100)
                 total_loss = total_lm_loss
                 if args.moe_freq > 0:
                     total_load_balancing_loss = batched_load_balancing_loss(moe_args)
                     clear_load_balancing_loss()
                     total_loss += total_load_balancing_loss
 
-            print("total_loss before BP (if args.accum_freq==1)", total_loss, "#"*100)
+            # print("total_loss before BP (if args.accum_freq==1)", total_loss, "#"*100)
             backward_start = time.time()
             backward(total_loss, scaler)
             backward_time_m.update(time.time() - backward_start)
-            print("total_loss after BP (if args.accum_freq==1)", total_loss, "#"*100)
+            # print("total_loss after BP (if args.accum_freq==1)", total_loss, "#"*100)
             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                 with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                     using_te and args.use_fp8
@@ -268,7 +268,7 @@ def train_one_epoch(
                                         / inputs.shape[0]
                                     )
                                     
-                print("local_lm_loss (ifnot args.accum_freq==1)", local_lm_loss, "#"*100)
+                # print("local_lm_loss (ifnot args.accum_freq==1)", local_lm_loss, "#"*100)
                 if ii == 0:
                     total_lm_loss = local_lm_loss
                     if args.moe_freq > 0:
@@ -324,7 +324,7 @@ def train_one_epoch(
             averagers.step()
 
         global_loss_tensor = total_loss.detach().clone()
-        print("global_loss_tensor", global_loss_tensor, "#"*100)
+        # print("global_loss_tensor", global_loss_tensor, "#"*100)
         if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
             # same for the average model loss
             for key, value in total_loss_avg.items():
@@ -355,7 +355,7 @@ def train_one_epoch(
             else:
                 losses_m.update(global_loss_tensor.item(), batch_size)
             
-            print("losses_m (a):, ", losses_m.val, losses_m.avg, losses_m.sum, losses_m.count, "#"*100)
+            # print("losses_m (a):, ", losses_m.val, losses_m.avg, losses_m.sum, losses_m.count, "#"*100)
             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                 for key, value in total_loss_avg.items():
                     losses_avg_m[key].update(value.item(), batch_size)
@@ -374,7 +374,7 @@ def train_one_epoch(
                 else:
                     losses_m.update(global_loss_tensor.item(), batch_size)
                 
-                print("losses_m (b):, ", losses_m.val, losses_m.avg, losses_m.sum, losses_m.count, "#"*100)
+                # print("losses_m (b):, ", losses_m.val, losses_m.avg, losses_m.sum, losses_m.count, "#"*100)
                 samples_per_second = inputs.numel() * args.world_size / batch_time_m.val
                 samples_per_second_per_gpu = inputs.numel() / batch_time_m.val
                 loss_str = f"Loss: {losses_m.avg:.3f}"

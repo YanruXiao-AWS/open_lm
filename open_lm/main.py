@@ -840,7 +840,7 @@ def main(args):
                     return self._loader.num_samples
             data["train"].dataloader = MpDeviceLoader(data["train"].dataloader, device)
             xm.rendezvous("wait_for_everyone_to_reach")
-            print("Step up XLA dataloader", "x"*100)
+            # print("Step up XLA dataloader", "x"*100)
 
         prev_step = global_step
         if is_master(args):
