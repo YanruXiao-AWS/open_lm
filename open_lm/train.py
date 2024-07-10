@@ -41,6 +41,13 @@ try:
 except ImportError as ie:
     using_te = False
 
+# import xla libs
+try:
+    import torch_xla.core.xla_model as xm
+    USE_XLA = True
+except:
+    USE_XLA = False
+
 
 def unwrap_model(model):
     if hasattr(model, "module"):
@@ -81,6 +88,9 @@ def train_one_epoch(
             As such, the number of steps in an "epoch" can vary, and we have to keep track of steps separately.
     """
     device = torch.device(args.device)
+    # if use_xla:
+    #     autocast = torch.autocast('xla')
+    # else:
     autocast = get_autocast(args.precision)
 
     model.train()
@@ -97,7 +107,8 @@ def train_one_epoch(
         sample_digits = math.ceil(math.log(dataloader.num_samples() + 1, 10))
     else:
         sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
-
+    # print("dataloader.num_batches: ", dataloader.num_batches(), "NUMBATCH"*100)
+    # print("dataloader num_samples: ", dataloader.num_samples(), "num_samples"*100)
     losses_m = AverageMeter()
     load_balancing_losses_m = AverageMeter()
     batch_time_m = AverageMeter()
@@ -117,22 +128,26 @@ def train_one_epoch(
     end = time.time()
 
     data_iterator = iter(dataloader)
-
+    
     if args.moe_freq > 0:
         # these MoEArgs are necessary for logging load balancing.
-        moe_args = MoEArgs(
-            hidden_size=model.dim,
-            ffn_hidden_size=model.dim * 4,
-            moe_num_experts=args.moe_num_experts,
-            num_layers=model.n_layers // args.moe_freq,
-            moe_expert_model_parallelism=True,
-            moe_top_k=args.moe_top_k,
-            device=torch.cuda.current_device(),
-            moe_capacity_factor=args.moe_capacity_factor,
-            moe_loss_weight=args.moe_loss_weight,
-            fp16=False,
-            bf16=False,
-        )
+        
+        if args.dist_backend=="xla":
+            raise Exception("TODO: MoE Behaviour on AWS Neuron is undefined. ")
+        else:
+            moe_args = MoEArgs(
+                hidden_size=model.dim,
+                ffn_hidden_size=model.dim * 4,
+                moe_num_experts=args.moe_num_experts,
+                num_layers=model.n_layers // args.moe_freq,
+                moe_expert_model_parallelism=True,
+                moe_top_k=args.moe_top_k,
+                device=torch.cuda.current_device(),
+                moe_capacity_factor=args.moe_capacity_factor,
+                moe_loss_weight=args.moe_loss_weight,
+                fp16=False,
+                bf16=False,
+            )
 
     for i in itertools.count():
         # ### Test
@@ -145,62 +160,51 @@ def train_one_epoch(
         if step >= total_steps:
             logging.warning(f"step: {step} has reached/exceeded total_steps: {total_steps}. ending training.")
             break
-
+        
+        # print("rank,i:", args.rank, i, "BEFORE"*10)
+        
         try:
             batch = next(data_iterator)
             has_data = torch.tensor(1, dtype=torch.long, device=device)
         except StopIteration:
             has_data = torch.tensor(0, dtype=torch.long, device=device)
-
+        # print("rank,i:", args.rank, i, "AFTER"*10)
         if args.world_size > 1:
-            dist.all_reduce(has_data, op=ReduceOp.SUM)
+            dist.all_reduce(has_data, op=ReduceOp.SUM)    
         if has_data < args.world_size:
             break
-
+        
         (texts,) = batch
         texts = torch.LongTensor(texts).to(device)
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
-
+        # print("rank, i, batch", args.rank, i, texts.shape, "Ivalue"*100)
+        # print("args.accum_freq", args.accum_freq, "FREQ"*100)
         if args.accum_freq == 1:
             with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                 using_te and args.use_fp8
-            ) else autocast():
+            ) else autocast() if not USE_XLA else torch.autocast("xla"):
                 forward_start = time.time()
                 inputs, targets = sample_chunk(texts, args)
-                # print("inputs", inputs, "#"*100)
                 out, _, _ = model(inputs)
-                # for name, param in model.named_parameters():
-                #     print("name: ", name, "has nan:", param.data.cpu().isnan().any())
-                #     # print("name: ", name, "has nan:", param.data.isnan().any()) ## BUG -> need to report
-                #     print("param:", param.data, "*"*100)
-                #     # if param.data.isnan().any():
-                #     #     print("name:", name,  "xx"*50)
-                #         # print("param:", param.data, "*"*100)
-                #     # break
-                # print("out: ", out, "#"*100)
                 forward_time_m.update(time.time() - forward_start)
 
                 if args.log_logit_mean:
                     logit_m.update(torch.mean(out).item())
-                # print("Out reshape", out.reshape(-1, args.vocab_size), "#"*100)
                 total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
-                # print("targets reshape", targets.reshape(-1), "#"*100)
                 total_loss = total_lm_loss
                 if args.moe_freq > 0:
                     total_load_balancing_loss = batched_load_balancing_loss(moe_args)
                     clear_load_balancing_loss()
                     total_loss += total_load_balancing_loss
 
-            # print("total_loss before BP (if args.accum_freq==1)", total_loss, "#"*100)
             backward_start = time.time()
             backward(total_loss, scaler)
             backward_time_m.update(time.time() - backward_start)
-            # print("total_loss after BP (if args.accum_freq==1)", total_loss, "#"*100)
             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                 with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                     using_te and args.use_fp8
-                ) else autocast():
+                ) else autocast() if not USE_XLA else torch.autocast("xla"):
                     for key, averager in averagers.avgs_dict.items():
                         with torch.no_grad():
                             out_avg, _, _ = averager.av_model(inputs)
@@ -224,7 +228,7 @@ def train_one_epoch(
                 with maybe_no_sync():
                     with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                         using_te and args.use_fp8
-                    ) else autocast():
+                    ) else autocast() if not USE_XLA else torch.autocast("xla"):
                         forward_start = time.time()
                         inputs_ii = inputs[ii * per_batch : (ii + 1) * per_batch]
                         if inputs_ii.shape[0] == 0:
@@ -253,7 +257,7 @@ def train_one_epoch(
                     backward_total_time += time.time() - backward_start
                     with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                         using_te and args.use_fp8
-                    ) else autocast():
+                    ) else autocast() if not USE_XLA else torch.autocast("xla"):
                         if (
                             averagers is not None
                             and args.log_avg_model_training_loss
@@ -268,7 +272,6 @@ def train_one_epoch(
                                         / inputs.shape[0]
                                     )
                                     
-                # print("local_lm_loss (ifnot args.accum_freq==1)", local_lm_loss, "#"*100)
                 if ii == 0:
                     total_lm_loss = local_lm_loss
                     if args.moe_freq > 0:
@@ -314,7 +317,6 @@ def train_one_epoch(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
             
             if args.dist_backend=="xla":
-                import torch_xla.core.xla_model as xm
                 xm.optimizer_step(optimizer)
             else:
                 optimizer.step()
@@ -324,20 +326,22 @@ def train_one_epoch(
             averagers.step()
 
         global_loss_tensor = total_loss.detach().clone()
-        # print("global_loss_tensor", global_loss_tensor, "#"*100)
         if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
             # same for the average model loss
             for key, value in total_loss_avg.items():
                 total_loss_avg[key] = value.detach().clone()
 
         sync_start = time.time()
-        if args.world_size > 1:
-            dist.all_reduce(global_loss_tensor, op=ReduceOp.AVG)
-            if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
-                for key, value in total_loss_avg.items():
-                    dist.all_reduce(value, op=ReduceOp.AVG)
-            if args.moe_freq > 0:
-                dist.all_reduce(total_load_balancing_loss, op=ReduceOp.AVG)
+        if args.dist_backend=="xla":
+            pass
+        else:
+            if args.world_size > 1:
+                dist.all_reduce(global_loss_tensor, op=ReduceOp.AVG)
+                if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
+                    for key, value in total_loss_avg.items():
+                        dist.all_reduce(value, op=ReduceOp.AVG)
+                if args.moe_freq > 0:
+                    dist.all_reduce(total_load_balancing_loss, op=ReduceOp.AVG)
         sync_time_m.update(time.time() - sync_start)
 
         batch_time_m.update(time.time() - end)
@@ -355,7 +359,6 @@ def train_one_epoch(
             else:
                 losses_m.update(global_loss_tensor.item(), batch_size)
             
-            # print("losses_m (a):, ", losses_m.val, losses_m.avg, losses_m.sum, losses_m.count, "#"*100)
             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                 for key, value in total_loss_avg.items():
                     losses_avg_m[key].update(value.item(), batch_size)
@@ -374,7 +377,6 @@ def train_one_epoch(
                 else:
                     losses_m.update(global_loss_tensor.item(), batch_size)
                 
-                # print("losses_m (b):, ", losses_m.val, losses_m.avg, losses_m.sum, losses_m.count, "#"*100)
                 samples_per_second = inputs.numel() * args.world_size / batch_time_m.val
                 samples_per_second_per_gpu = inputs.numel() / batch_time_m.val
                 loss_str = f"Loss: {losses_m.avg:.3f}"
@@ -449,8 +451,8 @@ def train_one_epoch(
                     for k in averagers.avgs_dict.keys():
                         losses_avg_m[k].reset()
 
-    # if args.dist_backend=="xla":
-    #     xm.mark_step()
+    if args.dist_backend=="xla":
+        xm.mark_step()
 
     # end for
     if tb_writer is not None:

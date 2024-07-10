@@ -43,6 +43,7 @@ try:
     import torch.utils.tensorboard as tensorboard
 except ImportError:
     tensorboard = None
+    
 
 from open_lm.model import create_model
 
@@ -64,6 +65,18 @@ from open_lm.file_utils import (
     log_num_checkpoints,
     terminate_sync_process,
 )
+
+try:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.parallel_loader as pl
+    import torch_xla.distributed.xla_multiprocessing as xmp
+    import torch_xla.distributed.xla_backend
+    # def is_master(*argsv):
+    #     is_root = xm.is_master_ordinal(local=False)
+    #     return is_root
+except:
+    pass
+
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
@@ -283,10 +296,16 @@ def save_checkpoint(
                 save_path = args.checkpoint_path if not failed else args.failed_checkpoint_path
                 path = os.path.join(save_path, f"{prefix}{completed_epoch}.pt")
                 print(f"Saving {prefix}{completed_epoch} in {path}...")
-                torch.save(
-                    prefixes[prefix],
-                    path,
-                )
+                if args.dist_backend=="xla":
+                    xm.save(
+                        prefixes[prefix],
+                        path,
+                    )
+                else:
+                    torch.save(
+                        prefixes[prefix],
+                        path,
+                    )
 
         if args.delete_previous_checkpoint:
             for prefix in prefixes:
@@ -303,7 +322,7 @@ def cleanup(sync_process, distributed=False):
 
 
 def main(args):
-    args = parse_args(args)
+    # args = parse_args(args) # comment for XLA-test
 
     requires_training = args.train_data or args.dataset_type == "synthetic" or args.dataset_manifest is not None
 
@@ -416,7 +435,10 @@ def main(args):
             # sync found checkpoint path to all ranks
             if args.dist_backend=="xla":
                 # For testing
-                resume_from = broadcast_object(args, resume_from)
+                print("resume_from: ", resume_from, "AAA"*30)
+                print("device type: ", device, 'DDDD' * 25)
+                # resume_from = broadcast_object(args, resume_from)
+                pass
             else:
                 resume_from = broadcast_object(args, resume_from)
         args.resume = resume_from
@@ -581,7 +603,9 @@ def main(args):
                 # this doesn't exist in older PyTorch, arg only added if enabled
                 ddp_args["static_graph"] = True
             if args.dist_backend=="xla":
-                model = model # skip
+                print("Device: ", device, "XXX"*40)
+                model = model.to(device) # skip
+                # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
             else:
                 model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
             
@@ -831,16 +855,22 @@ def main(args):
             )
             
         if args.dist_backend=="xla":
-            import torch_xla.core.xla_model as xm
-            import torch_xla.distributed.parallel_loader as pl
             class MpDeviceLoader(pl.MpDeviceLoader):
                 def num_batches(self):
                     return self._loader.num_batches
                 def num_samples(self):
                     return self._loader.num_samples
+            
+            # class MpDeviceLoader(pl.MpDeviceLoader):
+            #     def __init__(self, loader, device, **kwargs):
+            #         super().__init__(self, loader, device, **kwargs)
+            #         self.num_batches = self._loader.num_batches
+            #         self.num_samples = self._loader.num_samples
+                
             data["train"].dataloader = MpDeviceLoader(data["train"].dataloader, device)
-            xm.rendezvous("wait_for_everyone_to_reach")
-            # print("Step up XLA dataloader", "x"*100)
+            if args.val_data is not None:
+                data["val_data"].dataloader = MpDeviceLoader(data["val_data"].dataloader, device)
+            # xm.rendezvous("wait_for_everyone_to_reach")
 
         prev_step = global_step
         if is_master(args):
@@ -865,9 +895,12 @@ def main(args):
             data_parallel_group=args.world_group,
             num_workers=args.workers
         )
-
-        if args.distributed:
-            dist.barrier()
+        
+        if args.dist_backend=="xla":
+            xm.rendezvous("wait_for_everyone_to_reach")
+        else:
+            if args.distributed:
+                dist.barrier()
 
         done_training = global_step >= total_steps
         steps_done_epoch = global_step - prev_step
@@ -878,7 +911,11 @@ def main(args):
             break
 
         failed_ckpt = False
-        expected_steps = data["train"].dataloader.num_batches
+        if args.dist_backend=="xla":
+            expected_steps = data["train"].dataloader.num_batches()
+        else:
+            expected_steps = data["train"].dataloader.num_batches
+        
         if steps_done_epoch < (1 - args.data_tolerate_error_p) * expected_steps and not done_training:
             failed_ckpt = True
             num_ckpt_too_few_tokens += 1
@@ -886,6 +923,7 @@ def main(args):
                 logging.warning(
                     f"Epoch {epoch}, tokens seen: {steps_done_epoch * args.global_batch_size * args.seq_len}, tokens expected: {expected_steps * args.global_batch_size * args.seq_len}, ratio: {steps_done_epoch / expected_steps}"
                 )
+                logging.warning("MMMMM"*1000)
 
         epoch = epoch + 1
         evaluation_metrics = []
@@ -979,6 +1017,8 @@ def main(args):
         dist.barrier()
 
     cleanup(remote_sync_process, args.distributed)
+    # xm.rendezvous("wait_for_everyone_to_reach")
+    xm.mark_step()
     return args
 
 
@@ -998,5 +1038,32 @@ def copy_codebase(args):
     return 1
 
 
+def _mp_fn(index, args):
+    
+    main(args)
+    xm.rendezvous("_mp_fn finished")
+    return 
+    
+# _mp_fn = main
+
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    # main(sys.argv[1:])
+    args = parse_args(sys.argv[1:])
+    
+    # print(sys.argv[1:])
+    if args.dist_backend=="xla":
+        
+        if os.environ.get("WORLD_SIZE"):
+            args.world_group = dist.init_process_group('xla')
+            # print("args: ", args.world_group, "x"*1000)
+            _mp_fn(0, args)
+        else:
+            print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
+            xmp.spawn(_mp_fn, args=(args,))
+        
+        # args.world_group = dist.init_process_group('xla')
+        # xmp.spawn(_mp_fn, args=(args,))
+        
+    else:
+        # cuda
+        main(args)

@@ -63,7 +63,7 @@ def init_distributed_device(args):
         import torch_xla.distributed.xla_backend
         os.environ['XLA_USE_BF16'] = '1' 
         # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --no_cache' + ' --log_level=ERROR' + ' -O1'
-        os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR'  + ' -O1'
+        os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache'  + ' -O1'
     # For testing, allow forcing distributed mode to test distributed code path even on one gpu.
     if is_using_distributed() or args.force_distributed:
         if "SLURM_PROCID" in os.environ:
@@ -92,14 +92,16 @@ def init_distributed_device(args):
             # Note that this currently assumes that the world size is all gpus in a node.
             assert args.preset_world_size is None, "--preset_world_size with torchrun is not currently supported."
             args.local_rank, _, _ = world_info_from_env()
-            args.world_group = torch.distributed.init_process_group(
-                backend=args.dist_backend, init_method=args.dist_url
-            )
+
             if args.dist_backend=="xla":
                 args.world_size = xm.xrt_world_size()
                 args.rank = xm.get_ordinal()
                 print("args.rank: ", args.rank)
             else:
+                args.world_group = torch.distributed.init_process_group(
+                    backend=args.dist_backend, init_method=args.dist_url
+                )
+                print("args world_group: ", args.world_group, "x"*1000)
                 args.world_size = torch.distributed.get_world_size()
                 args.rank = torch.distributed.get_rank()
                 print("args.rank2: ", args.rank)
@@ -127,6 +129,7 @@ def broadcast_object(args, obj, src=0):
     else:
         objects = [None]
         print("obj NONE "+"#"*100)
+    print("obj: ", obj, "*"*100)
     dist.broadcast_object_list(objects, src=src)
     return objects[0]
 
