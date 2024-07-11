@@ -99,11 +99,11 @@ def train_one_epoch(
     
 
     dataloader = data["train"].dataloader
-    if args.dist_backend=="xla":
+    if False and args.dist_backend=="xla":
         num_batches_per_epoch = dataloader.num_batches()
     else:
         num_batches_per_epoch = dataloader.num_batches
-    if args.dist_backend=="xla":
+    if False and args.dist_backend=="xla":
         sample_digits = math.ceil(math.log(dataloader.num_samples() + 1, 10))
     else:
         sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
@@ -364,7 +364,11 @@ def train_one_epoch(
                     losses_avg_m[key].update(value.item(), batch_size)
             if i % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch or step == total_steps - 1:
                 num_samples = batch_count * batch_size * args.world_size
-                samples_per_epoch = dataloader.num_samples() if args.dist_backend=="xla" else dataloader.num_samples
+                if False and args.dist_backend=="xla":
+                    samples_per_epoch = dataloader.num_samples()
+                else:
+                    samples_per_epoch = dataloader.num_samples
+                     
                 percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
                 # gathered_loss = [torch.zeros_like(total_loss) for _ in range(args.world_size)]
@@ -390,7 +394,7 @@ def train_one_epoch(
                 )
 
                 # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
-                if args.dist_backend=="xla":
+                if False and args.dist_backend=="xla":
                     dataloader_num_batches = data["train"].dataloader.num_batches()
                 else:
                     dataloader_num_batches = data["train"].dataloader.num_batches

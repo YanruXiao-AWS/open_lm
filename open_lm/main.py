@@ -855,17 +855,17 @@ def main(args):
             )
             
         if args.dist_backend=="xla":
-            class MpDeviceLoader(pl.MpDeviceLoader):
-                def num_batches(self):
-                    return self._loader.num_batches
-                def num_samples(self):
-                    return self._loader.num_samples
-            
             # class MpDeviceLoader(pl.MpDeviceLoader):
-            #     def __init__(self, loader, device, **kwargs):
-            #         super().__init__(self, loader, device, **kwargs)
-            #         self.num_batches = self._loader.num_batches
-            #         self.num_samples = self._loader.num_samples
+            #     def num_batches(self):
+            #         return self._loader.num_batches
+            #     def num_samples(self):
+            #         return self._loader.num_samples
+            
+            class MpDeviceLoader(pl.MpDeviceLoader):
+                def __init__(self, loader, device, **kwargs):
+                    super().__init__(loader, device, **kwargs)
+                    self.num_batches = self._loader.num_batches
+                    self.num_samples = self._loader.num_samples
                 
             data["train"].dataloader = MpDeviceLoader(data["train"].dataloader, device)
             if args.val_data is not None:
@@ -911,7 +911,7 @@ def main(args):
             break
 
         failed_ckpt = False
-        if args.dist_backend=="xla":
+        if False and args.dist_backend=="xla":
             expected_steps = data["train"].dataloader.num_batches()
         else:
             expected_steps = data["train"].dataloader.num_batches
