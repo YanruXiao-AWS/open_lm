@@ -77,6 +77,20 @@ try:
 except:
     pass
 
+try:
+    from neuronx_distributed import parallel_layers
+    from neuronx_distributed.parallel_layers import (
+        checkpointing,
+        move_model_to_device,
+        parallel_state,
+    )
+    USE_NXD = True
+except:
+    USE_NXD = False
+    print("NXD is not being used", "NXDOFF" *100)
+    # exit()
+    pass
+
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
@@ -297,6 +311,10 @@ def save_checkpoint(
                 path = os.path.join(save_path, f"{prefix}{completed_epoch}.pt")
                 print(f"Saving {prefix}{completed_epoch} in {path}...")
                 if args.dist_backend=="xla":
+                    # if False and USE_NXD:
+                    #     parallel_layers.save(prefixes[prefix],
+                    #                          path)    
+                    # else:
                     xm.save(
                         prefixes[prefix],
                         path,
@@ -503,7 +521,12 @@ def main(args):
         # Optional: Use meta device
         if args.dist_backend=="xla":
             model = create_model(args, None)
-            model = model.to(args.device)
+            try:
+                parallel_layers.move_model_to_device(model, device)
+            except Exception as e:
+                print("Found error:", e)
+                exit()
+                model = model.to(args.device)
         else:
             with torch.device("meta" if args.experimental_meta_device and args.fsdp else args.device):
                 model = create_model(args, tensor_parallel_group)
@@ -617,6 +640,8 @@ def main(args):
     if is_master(args):
         logging.info(f"Model (has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters):")
         logging.info(f"{str(model)}")
+        # for name, param in model.named_parameters():
+        #     print(name, param.shape)
         logging.info("Params:")
         params_file = os.path.join(args.logs, args.name, "params.txt")
         with open(params_file, "w") as f:
@@ -803,7 +828,10 @@ def main(args):
         cleanup(remote_sync_process, args.distributed)
         return
 
-    loss = torch.nn.CrossEntropyLoss()
+    if USE_NXD:
+        loss = parallel_layers.loss_functions.parallel_cross_entropy
+    else:
+        loss = torch.nn.CrossEntropyLoss()
     if args.z_loss_coefficient != 0.0:
         if is_master(args):
             logging.info("Using CrossEntropyLossWithZLoss.")
@@ -855,22 +883,18 @@ def main(args):
             )
             
         if args.dist_backend=="xla":
-            # class MpDeviceLoader(pl.MpDeviceLoader):
-            #     def num_batches(self):
-            #         return self._loader.num_batches
-            #     def num_samples(self):
-            #         return self._loader.num_samples
-            
             class MpDeviceLoader(pl.MpDeviceLoader):
                 def __init__(self, loader, device, **kwargs):
                     super().__init__(loader, device, **kwargs)
                     self.num_batches = self._loader.num_batches
                     self.num_samples = self._loader.num_samples
-                
-            data["train"].dataloader = MpDeviceLoader(data["train"].dataloader, device)
-            if args.val_data is not None:
-                data["val_data"].dataloader = MpDeviceLoader(data["val_data"].dataloader, device)
-            # xm.rendezvous("wait_for_everyone_to_reach")
+            if NO_DP:
+                pass
+            else:
+                data["train"].dataloader = MpDeviceLoader(data["train"].dataloader, device)
+                if args.val_data is not None:
+                    data["val_data"].dataloader = MpDeviceLoader(data["val_data"].dataloader, device)
+                # xm.rendezvous("wait_for_everyone_to_reach")
 
         prev_step = global_step
         if is_master(args):
@@ -911,10 +935,8 @@ def main(args):
             break
 
         failed_ckpt = False
-        if False and args.dist_backend=="xla":
-            expected_steps = data["train"].dataloader.num_batches()
-        else:
-            expected_steps = data["train"].dataloader.num_batches
+
+        expected_steps = data["train"].dataloader.num_batches
         
         if steps_done_epoch < (1 - args.data_tolerate_error_p) * expected_steps and not done_training:
             failed_ckpt = True
@@ -1039,6 +1061,17 @@ def copy_codebase(args):
 
 
 def _mp_fn(index, args):
+    try:
+        # Try Tensor Parallel - hard coded now
+
+        args.tensor_parallel_size = 4
+        
+        
+        parallel_state.initialize_model_parallel(tensor_model_parallel_size=args.tensor_parallel_size)
+        
+    except:
+        pass
+    
     
     main(args)
     xm.rendezvous("_mp_fn finished")
@@ -1049,13 +1082,18 @@ def _mp_fn(index, args):
 if __name__ == "__main__":
     # main(sys.argv[1:])
     args = parse_args(sys.argv[1:])
-    
+    global NO_DP
+    NO_DP = False
+    print("Disable DP, Find it in main.py", "NODP"*100)
     # print(sys.argv[1:])
     if args.dist_backend=="xla":
         
         if os.environ.get("WORLD_SIZE"):
-            args.world_group = dist.init_process_group('xla')
-            # print("args: ", args.world_group, "x"*1000)
+            if NO_DP:
+                args.world_group = dist.init_process_group('xla')
+                pass
+            else:
+                args.world_group = dist.init_process_group('xla')
             _mp_fn(0, args)
         else:
             print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)

@@ -47,6 +47,12 @@ try:
     USE_XLA = True
 except:
     USE_XLA = False
+    
+try:
+    from neuronx_distributed.parallel_layers import parallel_state
+    USE_NXD = True
+except:
+    USE_NXD = False
 
 
 def unwrap_model(model):
@@ -60,7 +66,11 @@ def backward(total_loss, scaler):
     if scaler is not None:
         scaler.scale(total_loss).backward()
     else:
-        total_loss.backward()
+        # print("Total loss is:, ", total_loss, total_loss.shape, "LOSS"*100)
+        if USE_NXD:
+            total_loss.mean().backward()
+        else:
+            total_loss.backward()
 
 
 def train_one_epoch(
@@ -99,14 +109,9 @@ def train_one_epoch(
     
 
     dataloader = data["train"].dataloader
-    if False and args.dist_backend=="xla":
-        num_batches_per_epoch = dataloader.num_batches()
-    else:
-        num_batches_per_epoch = dataloader.num_batches
-    if False and args.dist_backend=="xla":
-        sample_digits = math.ceil(math.log(dataloader.num_samples() + 1, 10))
-    else:
-        sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
+
+    num_batches_per_epoch = dataloader.num_batches
+    sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
     # print("dataloader.num_batches: ", dataloader.num_batches(), "NUMBATCH"*100)
     # print("dataloader num_samples: ", dataloader.num_samples(), "num_samples"*100)
     losses_m = AverageMeter()
@@ -317,7 +322,13 @@ def train_one_epoch(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
             
             if args.dist_backend=="xla":
-                xm.optimizer_step(optimizer)
+                if USE_NXD:
+                        xm.optimizer_step(
+                            optimizer,
+                            groups=parallel_state.get_data_parallel_group(as_list=True)
+                        )
+                else:
+                    xm.optimizer_step(optimizer)
             else:
                 optimizer.step()
         optim_step_time_m.update(time.time() - optim_step_start)
@@ -325,7 +336,10 @@ def train_one_epoch(
         if averagers is not None:
             averagers.step()
 
-        global_loss_tensor = total_loss.detach().clone()
+        if USE_NXD:
+            global_loss_tensor = total_loss.detach().clone().mean()
+        else:
+            global_loss_tensor = total_loss.detach().clone()
         if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
             # same for the average model loss
             for key, value in total_loss_avg.items():
@@ -364,10 +378,8 @@ def train_one_epoch(
                     losses_avg_m[key].update(value.item(), batch_size)
             if i % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch or step == total_steps - 1:
                 num_samples = batch_count * batch_size * args.world_size
-                if False and args.dist_backend=="xla":
-                    samples_per_epoch = dataloader.num_samples()
-                else:
-                    samples_per_epoch = dataloader.num_samples
+
+                samples_per_epoch = dataloader.num_samples
                      
                 percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
@@ -394,10 +406,7 @@ def train_one_epoch(
                 )
 
                 # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
-                if False and args.dist_backend=="xla":
-                    dataloader_num_batches = data["train"].dataloader.num_batches()
-                else:
-                    dataloader_num_batches = data["train"].dataloader.num_batches
+                dataloader_num_batches = data["train"].dataloader.num_batches
                 log_data = {
                     "loss": losses_m.val,
                     "load_balancing_loss": load_balancing_losses_m.val,

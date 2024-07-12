@@ -57,6 +57,36 @@ try:
 
 except ImportError as ie:
     using_te = False
+    
+    
+try:
+    
+    import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
+    # from neuronx_distributed.kernels.flash_attn import nki_flash_attn_func
+    from neuronx_distributed.modules.qkv_linear import GQAQKVColumnParallelLinear
+    from neuronx_distributed.parallel_layers import mappings
+    from neuronx_distributed.parallel_layers.layers import (
+        ColumnParallelLinear,
+        ParallelEmbedding,
+        RowParallelLinear,
+    )
+    from neuronx_distributed.parallel_layers.loss_functions import parallel_cross_entropy
+    from neuronx_distributed.parallel_layers.parallel_state import (
+        get_tensor_model_parallel_size,
+    )
+    from neuronx_distributed.utils.model_utils import move_model_to_device
+    from neuronx_distributed.parallel_layers import parallel_state
+    USE_NXD = True 
+    # USE_NXD = False 
+    # print("Testing DP. GO to model.py to disable to test", "TEST"*100, )
+except Exception as e:
+    USE_NXD = False
+    
+    print("NXD is not being used in model.py", "NXDOFF" *100)
+    print(e)
+    exit()
+    pass
+
 
 # from openclip
 _MODEL_CONFIG_PATHS = [Path(__file__).parent / f"model_configs/"]
@@ -109,8 +139,8 @@ class Params:
     post_embed_norm: bool = False
     weight_tying: bool = False
     norm_type: nn.Module = te.LayerNorm if using_te else nn.LayerNorm
-    linear_type: nn.Module = LinearTE if using_te else nn.Linear
-    # te_device: str = "cuda" if using_te else xm.xla_device()
+    linear_type: nn.Module = LinearTE if using_te else nn.Linear 
+    
     te_device: str = "cuda" if using_te else 'xla'
     attn_func: Callable = xformers_attn if torch.cuda.is_available() else torch_attn
     apply_qk_norm: bool = False
@@ -144,8 +174,22 @@ class CustomAttn(nn.Module):
         super().__init__()
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
-        self.in_proj = args.linear_type(args.dim, 3 * args.n_heads * self.head_dim, bias=False, device=args.te_device)
-        self.out_proj = args.linear_type(args.n_heads * self.head_dim, args.dim, bias=False, device=args.te_device)
+        
+        if USE_NXD:
+            self.in_proj = ColumnParallelLinear(args.dim, 
+                                                3 * args.n_heads * self.head_dim, 
+                                                bias=False,
+                                                gather_output=False).to(args.te_device)
+            self.out_proj = RowParallelLinear(args.n_heads * self.head_dim, 
+                                              args.dim, 
+                                              bias=False,
+                                              input_is_parallel=True).to(args.te_device)
+            
+
+        else: 
+            self.in_proj = args.linear_type(args.dim, 3 * args.n_heads * self.head_dim, bias=False, device=args.te_device)
+            self.out_proj = args.linear_type(args.n_heads * self.head_dim, args.dim, bias=False, device=args.te_device)
+        
         self.pos_embed = get_pos_embed(args)
         self.attn_fn = args.attn_func
         self.apply_qk_norm = args.apply_qk_norm
@@ -171,6 +215,14 @@ class CustomAttn(nn.Module):
 
         self.layer_id = layer_id
         self.dim = args.dim
+        if USE_NXD:
+            # update the number of head and dim, as we shard tensor using TP. 
+            tp_size = parallel_state.get_tensor_model_parallel_size()
+            # print("tp_size: ", tp_size, "TPSIZE"*100)
+            self.n_heads = args.n_heads // tp_size
+            self.dim = args.dim // tp_size
+            print("n_heads, dim: ", self.n_heads, self.dim, "DIM"*100)
+        
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -255,10 +307,19 @@ class GemmaMLP(nn.Module):
 class SwiGLUTorch(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args: Params = Params, bias=True):
         super().__init__()
-        self.w12 = nn.Linear(in_dim, 2 * hidden_dim, bias=bias, device=args.te_device)
-        # self.w12 = nn.Linear(in_dim, 2 * hidden_dim, bias=bias)
-        self.w3 = nn.Linear(hidden_dim, out_dim, bias=bias, device=args.te_device)
-        # self.w3 = nn.Linear(hidden_dim, out_dim, bias=bias)
+        if USE_NXD:
+            self.w12 = ColumnParallelLinear(in_dim, 
+                                            2 * hidden_dim, 
+                                            bias=bias,
+                                            gather_output=False).to(args.te_device)
+            self.w3 = RowParallelLinear(hidden_dim, 
+                                              out_dim, 
+                                              bias=bias,
+                                              input_is_parallel=True).to(args.te_device)
+        else:
+            self.w12 = nn.Linear(in_dim, 2 * hidden_dim, bias=bias, device=args.te_device)
+            self.w3 = nn.Linear(hidden_dim, out_dim, bias=bias, device=args.te_device)
+
 
     def forward(self, x):
         gate, x = self.w12(x).chunk(2, dim=-1)
