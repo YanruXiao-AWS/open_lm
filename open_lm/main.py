@@ -1064,9 +1064,10 @@ def _mp_fn(index, args):
     try:
         # Try Tensor Parallel - hard coded now
 
-        args.tensor_parallel_size = 4
+        print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
+        args.tensor_parallel_size = int(os.environ.get("WORLD_SIZE"))
         
-        
+        # args.tensor_parallel_size = 2
         parallel_state.initialize_model_parallel(tensor_model_parallel_size=args.tensor_parallel_size)
         
     except:
@@ -1084,7 +1085,8 @@ if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
     global NO_DP
     NO_DP = False
-    print("Disable DP, Find it in main.py", "NODP"*100)
+    if NO_DP:
+        print("Disable DP, Find it in main.py", "NODP"*100)
     # print(sys.argv[1:])
     if args.dist_backend=="xla":
         

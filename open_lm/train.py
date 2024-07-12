@@ -197,6 +197,9 @@ def train_one_epoch(
                 if args.log_logit_mean:
                     logit_m.update(torch.mean(out).item())
                 total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
+                # print("total_lm_loss: ", total_lm_loss, "LMLOSS"*100 )
+                if USE_XLA:
+                    xm.mark_step() # Somehow it is important; removing it makes an error.
                 total_loss = total_lm_loss
                 if args.moe_freq > 0:
                     total_load_balancing_loss = batched_load_balancing_loss(moe_args)

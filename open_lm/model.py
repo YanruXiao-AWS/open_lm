@@ -221,7 +221,7 @@ class CustomAttn(nn.Module):
             # print("tp_size: ", tp_size, "TPSIZE"*100)
             self.n_heads = args.n_heads // tp_size
             self.dim = args.dim // tp_size
-            print("n_heads, dim: ", self.n_heads, self.dim, "DIM"*100)
+            # print("n_heads, dim: ", self.n_heads, self.dim, "DIM"*100)
         
         self.reset_parameters()
 
@@ -238,7 +238,7 @@ class CustomAttn(nn.Module):
     def forward(self, x: torch.Tensor, is_causal=True, past_key_value=None, use_cache=False, attention_mask=None):
         batchsize, q_len, _ = x.shape
         queries, keys, vals = self.in_proj(x).chunk(3, dim=-1)
-
+        # print("queries shape", self.in_proj(x).shape, "SHAPE"*100)
         queries = self.q_norm(queries)
         keys = self.k_norm(keys)
 
@@ -344,7 +344,6 @@ class Block(nn.Module):
             # this follows llama / lit llama -- go to multiple of 256
             self.hidden_dim = 256 * ((int(2 * 4 * args.dim / 3) + 256 - 1) // 256)
             self.feed_forward = SwiGLUTorch(args.dim, self.hidden_dim, args.dim, args, bias=False)
-            # self.feed_forward = SwiGLUTorch(args.dim, self.hidden_dim, args.dim, args, bias=True)
         elif args.ffn_type == "gelu":
             # Follows mosaic mpt7b, but without a bias.
             self.hidden_dim = args.dim * 4
@@ -438,8 +437,15 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-
-        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
+        if False and USE_NXD:
+            self.tok_embeddings = ParallelEmbedding(
+                num_embeddings=params.vocab_size,
+                embedding_dim=params.dim
+                
+            )
+        else:
+            print("Disabled ParallelEmbedding for debug")
+            self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
         self.layers = torch.nn.ModuleList()
         ffn_type_ = params.ffn_type
@@ -455,7 +461,17 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             params.dim,
             eps=params.norm_eps,
         )
-        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+        if USE_NXD:
+            # self.output = ColumnParallelLinear(params.dim, params.vocab_size, bias=False)
+            self.output = ColumnParallelLinear(
+                params.dim, 
+                params.vocab_size,
+                bias=False,
+                gather_output=True).to('xla')
+            
+        else:
+            self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+            
         if self.weight_tying:
             self.tok_embeddings.weight = self.output.weight
         self.grad_checkpointing = False
