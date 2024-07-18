@@ -17,7 +17,17 @@ try:
 except ImportError as ie:
     using_te = False
 
+try:
+    from neuronx_distributed.parallel_layers import (
+        layer_norm,
+    )
+    USE_NXD = True
+    # print("NXD Layer Norm used", "NXD"*100)
+except:
+    USE_NXD = False
+    # print("NXD Layer Norm not used", "NONXD"*100)
 
+    
 class LayerNorm(nn.Module):
     # NOTE: taken from official pytorch implementation and modified
     # to allow revoval of gain and bias independently
@@ -167,28 +177,36 @@ class RmsNorm(nn.Module):
 
 
 def get_norm_class(model_norm, use_fp8=False):
-    if model_norm == "default_layer_norm":
-        return torch.nn.LayerNorm
-    elif model_norm == "lp_layer_norm":
-        if use_fp8 and using_te:
-            return LPLayerNormTE
-        return LPLayerNorm
-    elif model_norm == "gain_only_lp_layer_norm":
-        if use_fp8 and using_te:
-            return partial(LPLayerNormTE, elementwise_gain=True, elementwise_bias=False)
-        return partial(LPLayerNorm, elementwise_gain=True, elementwise_bias=False)
-    elif model_norm == "gain_only_layer_norm":
-        if use_fp8 and using_te:
-            return partial(LayerNormTE, elementwise_gain=True, elementwise_bias=False)
-        return partial(LayerNorm, elementwise_gain=True, elementwise_bias=False)
-
-    elif model_norm == "no_wb_layer_norm":
-        if use_fp8 and using_te:
-            return partial(LayerNormTE, elementwise_gain=False, elementwise_bias=False)
-        return partial(LayerNorm, elementwise_gain=False, elementwise_bias=False)
-
-    elif model_norm == "rms_norm":
-        return RmsNorm
-
+    if USE_NXD:
+        if model_norm == "default_layer_norm":
+            # print("NXD Layer Norm used in function", "NXDFFF"*100)
+            return layer_norm.LayerNorm
+        
+        else:
+            raise ValueError(f"Unsupported model-norm by Neuron Device: {model_norm}")
     else:
-        raise ValueError(f"Unsupported model-norm: {model_norm}")
+        if model_norm == "default_layer_norm":
+            return torch.nn.LayerNorm
+        elif model_norm == "lp_layer_norm":
+            if use_fp8 and using_te:
+                return LPLayerNormTE
+            return LPLayerNorm
+        elif model_norm == "gain_only_lp_layer_norm":
+            if use_fp8 and using_te:
+                return partial(LPLayerNormTE, elementwise_gain=True, elementwise_bias=False)
+            return partial(LPLayerNorm, elementwise_gain=True, elementwise_bias=False)
+        elif model_norm == "gain_only_layer_norm":
+            if use_fp8 and using_te:
+                return partial(LayerNormTE, elementwise_gain=True, elementwise_bias=False)
+            return partial(LayerNorm, elementwise_gain=True, elementwise_bias=False)
+
+        elif model_norm == "no_wb_layer_norm":
+            if use_fp8 and using_te:
+                return partial(LayerNormTE, elementwise_gain=False, elementwise_bias=False)
+            return partial(LayerNorm, elementwise_gain=False, elementwise_bias=False)
+
+        elif model_norm == "rms_norm":
+            return RmsNorm
+
+        else:
+            raise ValueError(f"Unsupported model-norm: {model_norm}")

@@ -112,6 +112,9 @@ def train_one_epoch(
 
     num_batches_per_epoch = dataloader.num_batches
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
+    if is_master(args):
+        # print("sample_digits", sample_digits, "SD"*100)
+        pass
     # print("dataloader.num_batches: ", dataloader.num_batches(), "NUMBATCH"*100)
     # print("dataloader num_samples: ", dataloader.num_samples(), "num_samples"*100)
     losses_m = AverageMeter()
@@ -175,7 +178,11 @@ def train_one_epoch(
             has_data = torch.tensor(0, dtype=torch.long, device=device)
         # print("rank,i:", args.rank, i, "AFTER"*10)
         if args.world_size > 1:
-            dist.all_reduce(has_data, op=ReduceOp.SUM)    
+            dist.all_reduce(has_data, op=ReduceOp.SUM)
+            if USE_XLA:
+                # xm.mark_step()
+                pass
+            # print("has_data:", has_data, "DATA"*100)
         if has_data < args.world_size:
             break
         
@@ -183,7 +190,9 @@ def train_one_epoch(
         texts = torch.LongTensor(texts).to(device)
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
-        # print("rank, i, batch", args.rank, i, texts.shape, "Ivalue"*100)
+        if is_master(args):
+            # print("rank, i, batch", args.rank, i, texts.shape, "Ivalue"*100)
+            pass
         # print("args.accum_freq", args.accum_freq, "FREQ"*100)
         if args.accum_freq == 1:
             with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
@@ -199,7 +208,8 @@ def train_one_epoch(
                 total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
                 # print("total_lm_loss: ", total_lm_loss, "LMLOSS"*100 )
                 if USE_XLA:
-                    xm.mark_step() # Somehow it is important; removing it makes an error.
+                    # xm.mark_step() # Somehow it is important; removing it makes an error. Adding it may result in hang. 
+                    pass
                 total_loss = total_lm_loss
                 if args.moe_freq > 0:
                     total_load_balancing_loss = batched_load_balancing_loss(moe_args)
@@ -341,6 +351,8 @@ def train_one_epoch(
 
         if USE_NXD:
             global_loss_tensor = total_loss.detach().clone().mean()
+            # print("LOSS: ", global_loss_tensor, "GLT"*100 )
+            # xm.mark_step()
         else:
             global_loss_tensor = total_loss.detach().clone()
         if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
@@ -374,6 +386,7 @@ def train_one_epoch(
                 losses_m.update(global_loss_tensor.item() - total_load_balancing_loss.item(), batch_size)
                 load_balancing_losses_m.update(total_load_balancing_loss.item(), batch_size)
             else:
+                # print("LOSS:", global_loss_tensor.item(), batch_size,"LOSS"*100)
                 losses_m.update(global_loss_tensor.item(), batch_size)
             
             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:

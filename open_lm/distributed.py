@@ -4,6 +4,12 @@ import logging
 import torch
 import torch.distributed as dist
 
+try:
+    import torch_xla.core.xla_model as xm
+    USE_XLA = True
+except:
+    USE_XLA = False
+
 
 def is_global_master(args):
     return args.rank == 0
@@ -14,7 +20,10 @@ def is_local_master(args):
 
 
 def is_master(args, local=False):
-    return is_local_master(args) if local else is_global_master(args)
+    if USE_XLA:
+        return xm.is_master_ordinal(local=local)
+    else:
+        return is_local_master(args) if local else is_global_master(args)
 
 
 def is_using_distributed():
@@ -96,17 +105,17 @@ def init_distributed_device(args):
             if args.dist_backend=="xla":
                 args.world_size = xm.xrt_world_size()
                 args.rank = xm.get_ordinal()
-                print("args.rank: ", args.rank)
+                # print("args.rank: ", args.rank)
             else:
                 args.world_group = torch.distributed.init_process_group(
                     backend=args.dist_backend, init_method=args.dist_url
                 )
-                print("args world_group: ", args.world_group, "x"*1000)
+                # print("args world_group: ", args.world_group, "x"*1000)
                 args.world_size = torch.distributed.get_world_size()
                 args.rank = torch.distributed.get_rank()
-                print("args.rank2: ", args.rank)
+                # print("args.rank2: ", args.rank)
         args.distributed = True
-    print("args.rank -- not distributed:", args.rank)
+    # print("args.rank -- not distributed:", args.rank)
     if torch.cuda.is_available():
         if args.distributed and not args.no_set_device_rank:
             device = "cuda:%d" % args.local_rank
@@ -125,11 +134,11 @@ def init_distributed_device(args):
 def broadcast_object(args, obj, src=0):
     if args.rank == src:
         objects = [obj]
-        print("obj src"+"#"*100)
+        # print("obj src"+"#"*100)
     else:
         objects = [None]
-        print("obj NONE "+"#"*100)
-    print("obj: ", obj, "*"*100)
+        # print("obj NONE "+"#"*100)
+    # print("obj: ", obj, "*"*100)
     dist.broadcast_object_list(objects, src=src)
     return objects[0]
 

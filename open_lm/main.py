@@ -74,7 +74,10 @@ try:
     # def is_master(*argsv):
     #     is_root = xm.is_master_ordinal(local=False)
     #     return is_root
+    
+    USE_XLA = True
 except:
+    USE_XLA = False
     pass
 
 try:
@@ -87,11 +90,11 @@ try:
     USE_NXD = True
 except:
     USE_NXD = False
-    print("NXD is not being used", "NXDOFF" *100)
+    # print("NXD is not being used", "NXDOFF" *100)
     # exit()
     pass
 
-
+COMPILE_MODEL = True
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
 
@@ -311,14 +314,21 @@ def save_checkpoint(
                 path = os.path.join(save_path, f"{prefix}{completed_epoch}.pt")
                 print(f"Saving {prefix}{completed_epoch} in {path}...")
                 if args.dist_backend=="xla":
-                    # if False and USE_NXD:
-                    #     parallel_layers.save(prefixes[prefix],
-                    #                          path)    
-                    # else:
-                    xm.save(
-                        prefixes[prefix],
-                        path,
-                    )
+                    # print(os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None), 'GRAPH'*100)
+                    # if not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None): # Do not save checkpoint during pre-compile
+                    
+                    if not COMPILE_MODEL:
+                        if USE_NXD:
+                            print("path: ", path, "P"*100)
+                            parallel_layers.save(prefixes[prefix],
+                                                path)    
+                        else:
+                            xm.save(
+                                prefixes[prefix],
+                                path,
+                            )
+                    else:
+                        print("Compile model manually enabled in main.py. No save checkpoint.", "W"*100)
                 else:
                     torch.save(
                         prefixes[prefix],
@@ -355,13 +365,21 @@ def main(args):
     # fully initialize distributed device environment
     device = init_distributed_device(args)
 
-    assert (
-        args.global_batch_size % args.world_size == 0
-    ), f"Global batch size ({args.global_batch_size}) is not divisible by number of GPUs ({args.world_size}), and thus cannot be respected."
+    if not USE_NXD:
+        assert (
+            args.global_batch_size % args.world_size == 0
+        ), f"Global batch size ({args.global_batch_size}) is not divisible by number of GPUs ({args.world_size}), and thus cannot be respected."
 
-    args.per_gpu_batch_size = max(args.global_batch_size // args.world_size, 1)
-    if args.val_data is not None:
-        args.per_gpu_val_batch_size = max(args.global_val_batch_size // args.world_size, 1)
+    if USE_NXD:
+        args.per_gpu_batch_size = max(args.global_batch_size * args.tensor_parallel_size // args.world_size , 1)
+        # args.per_gpu_batch_size = max(args.global_batch_size // args.tensor_parallel_size , 1)
+        if args.val_data is not None:
+            args.per_gpu_val_batch_size = max(args.global_val_batch_size * args.world_size // args.tensor_parallel_size, 1)
+    else:
+        
+        args.per_gpu_batch_size = max(args.global_batch_size // args.world_size, 1)
+        if args.val_data is not None:
+            args.per_gpu_val_batch_size = max(args.global_val_batch_size // args.world_size, 1)
 
     if args.hf_model is not None and args.hf_seq_len is None:
         raise ValueError("If passing --hf-model, must also pass --hf-seq-len to be used for training/fine-tuning.")
@@ -453,8 +471,9 @@ def main(args):
             # sync found checkpoint path to all ranks
             if args.dist_backend=="xla":
                 # For testing
-                print("resume_from: ", resume_from, "AAA"*30)
-                print("device type: ", device, 'DDDD' * 25)
+                if is_master(args):
+                    print("resume_from: ", resume_from, "AAA"*30)
+                    print("device type: ", device, 'DDDD' * 25)
                 # resume_from = broadcast_object(args, resume_from)
                 pass
             else:
@@ -522,6 +541,19 @@ def main(args):
         if args.dist_backend=="xla":
             model = create_model(args, None)
             try:
+                import math
+                import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
+                def get_and_move_model_sequential(device, model, num_workers_per_step=1):
+                    local_rank = xm.get_local_ordinal()
+                    local_world_size = neuronx_dist_utils.get_local_world_size()
+                    for worker in range(math.ceil(local_world_size / num_workers_per_step)):
+                        if local_rank // num_workers_per_step == worker:
+                            # model = get_model()
+                            move_model_to_device(model, device)
+                        xm.rendezvous("get_and_move_model_sequential" + str(worker))
+                    return model
+                
+                # get_and_move_model_sequential(device, model, 4)
                 parallel_layers.move_model_to_device(model, device)
             except Exception as e:
                 print("Found error:", e)
@@ -626,7 +658,6 @@ def main(args):
                 # this doesn't exist in older PyTorch, arg only added if enabled
                 ddp_args["static_graph"] = True
             if args.dist_backend=="xla":
-                print("Device: ", device, "XXX"*40)
                 model = model.to(device) # skip
                 # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
             else:
@@ -732,6 +763,8 @@ def main(args):
         skip_train=args.dataset_manifest is not None,
         floor=args.dataset_manifest is not None,
     )
+    
+    # print("BatchSize", data["train"].dataloader.__dict__, "BS"*100)
 
     if args.target_mask_left is not None:
         # tokens handled with same modulo in dataloading
@@ -945,7 +978,7 @@ def main(args):
                 logging.warning(
                     f"Epoch {epoch}, tokens seen: {steps_done_epoch * args.global_batch_size * args.seq_len}, tokens expected: {expected_steps * args.global_batch_size * args.seq_len}, ratio: {steps_done_epoch / expected_steps}"
                 )
-                logging.warning("MMMMM"*1000)
+                # logging.warning("MMMMM"*1000)
 
         epoch = epoch + 1
         evaluation_metrics = []
@@ -987,29 +1020,32 @@ def main(args):
                     assert wandb is not None, "Please install wandb."
                     wandb.log({name: val, "step": global_step, "tokens": end_of_epoch_log["tokens"]})
 
-        # Saving checkpoints.
-        save_checkpoint(
-            args,
-            model,
-            optimizer,
-            scaler,
-            epoch,
-            evaluation_metrics,
-            step=global_step,
-            is_final_checkpoint=done_training,
-            percentage_of_data_seen=1.0 * steps_done_epoch / expected_steps,
-            next_shard_per_source=next_shard_per_source if args.dataset_manifest is not None else None,
-            samples_seen=samples_seen if args.dataset_manifest is not None else None,
-            shard_shuffle_seed=args.shard_shuffle_seed,
-            train_data_string=train_data_string_per_source if args.dataset_manifest is not None else None,
-            averagers=averagers,
-            failed=failed_ckpt,
-        )
-
-        if num_ckpt_too_few_tokens > args.data_tolerate_num_ckpts:
-            raise RuntimeError(
-                f"{num_ckpt_too_few_tokens} checkpoints happened where the number of tokens seen was {1 - args.data_tolerate_error_p} of expected. This is likely due to transient errors e.g. reading from S3."
+        if USE_XLA and COMPILE_MODEL:
+            pass
+        else:
+            # Saving checkpoints.
+            save_checkpoint(
+                args,
+                model,
+                optimizer,
+                scaler,
+                epoch,
+                evaluation_metrics,
+                step=global_step,
+                is_final_checkpoint=done_training,
+                percentage_of_data_seen=1.0 * steps_done_epoch / expected_steps,
+                next_shard_per_source=next_shard_per_source if args.dataset_manifest is not None else None,
+                samples_seen=samples_seen if args.dataset_manifest is not None else None,
+                shard_shuffle_seed=args.shard_shuffle_seed,
+                train_data_string=train_data_string_per_source if args.dataset_manifest is not None else None,
+                averagers=averagers,
+                failed=failed_ckpt,
             )
+
+            if num_ckpt_too_few_tokens > args.data_tolerate_num_ckpts:
+                raise RuntimeError(
+                    f"{num_ckpt_too_few_tokens} checkpoints happened where the number of tokens seen was {1 - args.data_tolerate_error_p} of expected. This is likely due to transient errors e.g. reading from S3."
+                )
 
         if done_training:
             if is_master(args):
@@ -1064,11 +1100,18 @@ def _mp_fn(index, args):
     try:
         # Try Tensor Parallel - hard coded now
 
-        print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
-        args.tensor_parallel_size = int(os.environ.get("WORLD_SIZE"))
+        # print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
+        # args.tensor_parallel_size = int(os.environ.get("WORLD_SIZE"))
         
         # args.tensor_parallel_size = 2
-        parallel_state.initialize_model_parallel(tensor_model_parallel_size=args.tensor_parallel_size)
+        
+        parallel_state.initialize_model_parallel(
+            tensor_model_parallel_size=args.tensor_parallel_size,
+            
+                                                 )
+        args.data_parallel_size = parallel_state.get_data_parallel_size()
+
+        
         
     except:
         pass

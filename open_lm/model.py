@@ -84,7 +84,7 @@ except Exception as e:
     
     print("NXD is not being used in model.py", "NXDOFF" *100)
     print(e)
-    exit()
+    # exit()
     pass
 
 
@@ -437,11 +437,11 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-        if False and USE_NXD:
+        # if False and USE_NXD:
+        if USE_NXD:
             self.tok_embeddings = ParallelEmbedding(
                 num_embeddings=params.vocab_size,
                 embedding_dim=params.dim
-                
             )
         else:
             print("Disabled ParallelEmbedding for debug")
@@ -463,12 +463,17 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
         )
         if USE_NXD:
             # self.output = ColumnParallelLinear(params.dim, params.vocab_size, bias=False)
-            self.output = ColumnParallelLinear(
+            # self.output = ColumnParallelLinear(
+            #     params.dim, 
+            #     params.vocab_size,
+            #     bias=False,
+            #     gather_output=True).to('xla')
+            self.output = RowParallelLinear(
                 params.dim, 
                 params.vocab_size,
                 bias=False,
-                gather_output=True).to('xla')
-            
+                input_is_parallel=False,
+            ).to('xla')
         else:
             self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
             
@@ -500,7 +505,11 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
                 token for sequence s.
         """
         if input_ids is not None:
+            # print("input_ids"+str(input_ids.shape), "X"*100)
             x = self.tok_embeddings(input_ids)
+            # print(str(x.shape),"X2"*100)
+            # print(self.tok_embeddings.weight.shape,"X3"*100)
+            
         elif inputs_embeds is not None:
             x = inputs_embeds
         else:
@@ -520,7 +529,10 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
         if past_key_values[0] is None:
             past_key_values = None
         x = self.norm(x)
+        # print(type(self.norm), "norm"*100)
+        # print(x.shape,"X4"*100)
         output = self.output(x)
+        # print(self.output.weight.shape,"X5"*100)
         # follow llama in casting this to float.
         return output.float(), x, past_key_values
 

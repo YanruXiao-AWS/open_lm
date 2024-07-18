@@ -793,6 +793,12 @@ def parse_args(args):
         default=False,
         help="If set, allow FP8 training for the model.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size for Neuron Device",
+    )
 
     add_model_args(parser)
 
@@ -802,6 +808,7 @@ def parse_args(args):
         logging.info(f"Loaded config from file: {args=}")
     else:
         args = parser.parse_args(args)
+
 
     check_args(args)
 
