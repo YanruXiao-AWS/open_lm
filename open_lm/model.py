@@ -77,8 +77,9 @@ try:
     from neuronx_distributed.utils.model_utils import move_model_to_device
     from neuronx_distributed.parallel_layers import parallel_state
     USE_NXD = True 
-    # USE_NXD = False 
-    # print("Testing DP. GO to model.py to disable to test", "TEST"*100, )
+    USE_NXD = False
+    print("USE_NXD is manually set to false in model.py")
+
 except Exception as e:
     USE_NXD = False
     

@@ -51,8 +51,11 @@ except:
 try:
     from neuronx_distributed.parallel_layers import parallel_state
     USE_NXD = True
+    USE_NXD = False
+    print("USE_NXD is manually set to false in train.py")
 except:
     USE_NXD = False
+    
 
 
 def unwrap_model(model):
@@ -169,29 +172,35 @@ def train_one_epoch(
             logging.warning(f"step: {step} has reached/exceeded total_steps: {total_steps}. ending training.")
             break
         
-        # print("rank,i:", args.rank, i, "BEFORE"*10)
-        
         try:
             batch = next(data_iterator)
-            has_data = torch.tensor(1, dtype=torch.long, device=device)
+            # has_data = torch.tensor(1, dtype=torch.long, device=device)
+            has_data = torch.tensor(int(args.rank)+5, dtype=torch.long, device=device) * 10
         except StopIteration:
             has_data = torch.tensor(0, dtype=torch.long, device=device)
-        # print("rank,i:", args.rank, i, "AFTER"*10)
+            break
+    
+        
         if args.world_size > 1:
             dist.all_reduce(has_data, op=ReduceOp.SUM)
-            if USE_XLA:
-                # xm.mark_step()
-                pass
-            # print("has_data:", has_data, "DATA"*100)
+            
         if has_data < args.world_size:
             break
         
+        
         (texts,) = batch
-        texts = torch.LongTensor(texts).to(device)
+        if USE_XLA:
+
+            texts = torch.LongTensor(texts.to('cpu')) # extra step to eliminate a torch bug
+            texts = texts.to(device)
+        else:
+            texts = torch.LongTensor(texts).to(device)
+            
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
+        
         if is_master(args):
-            # print("rank, i, batch", args.rank, i, texts.shape, "Ivalue"*100)
+            # print("rank, i, batch", args.rank, i, texts.shape, "D"*100)
             pass
         # print("args.accum_freq", args.accum_freq, "FREQ"*100)
         if args.accum_freq == 1:
@@ -361,10 +370,27 @@ def train_one_epoch(
                 total_loss_avg[key] = value.detach().clone()
 
         sync_start = time.time()
-        if args.dist_backend=="xla":
-            pass
+        if USE_XLA:
+           if args.world_size > 1:
+                # pass
+                print(f"Before: Rank: {args.rank}, GLT: {global_loss_tensor}", "B"*100)
+                xm.all_reduce(xm.REDUCE_SUM, global_loss_tensor) # buggy computation
+                # dist.all_reduce(global_loss_tensor, op=ReduceOp.SUM) # Compilation error
+                print(f"iter: {i}, rank: {args.rank}, GLT: {global_loss_tensor.item}")
+                global_loss_tensor /= args.world_size # for avg
+                if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
+                    for key, value in total_loss_avg.items():
+                        xm.all_reduce(xm.REDUCE_SUM, value)
+                        # dist.all_reduce(value, op=ReduceOp.SUM)
+                        value /= args.world_size # for avg
+                if args.moe_freq > 0:
+                    xm.all_reduce(xm.REDUCE_SUM, total_load_balancing_loss)
+                    # dist.all_reduce(total_load_balancing_loss, op=ReduceOp.SUM)
+                    total_load_balancing_loss /= args.world_size # for avg
+                print(f"After: Rank: {args.rank}, GLT: {global_loss_tensor}", "A"*100)
         else:
             if args.world_size > 1:
+
                 dist.all_reduce(global_loss_tensor, op=ReduceOp.AVG)
                 if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                     for key, value in total_loss_avg.items():
@@ -386,8 +412,12 @@ def train_one_epoch(
                 losses_m.update(global_loss_tensor.item() - total_load_balancing_loss.item(), batch_size)
                 load_balancing_losses_m.update(total_load_balancing_loss.item(), batch_size)
             else:
-                # print("LOSS:", global_loss_tensor.item(), batch_size,"LOSS"*100)
-                losses_m.update(global_loss_tensor.item(), batch_size)
+                
+                if USE_XLA:
+                    # print("LOSS BEFORE:", global_loss_tensor.item(), batch_size, type(global_loss_tensor),"BEFORE"*100)
+                    losses_m.update(global_loss_tensor.item(), batch_size) # line of code where issue is; first call
+                else:
+                    losses_m.update(global_loss_tensor.item(), batch_size) 
             
             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                 for key, value in total_loss_avg.items():
@@ -480,8 +510,8 @@ def train_one_epoch(
                     for k in averagers.avgs_dict.keys():
                         losses_avg_m[k].reset()
 
-    if args.dist_backend=="xla":
-        xm.mark_step()
+    # if args.dist_backend=="xla":
+    #     xm.mark_step()
 
     # end for
     if tb_writer is not None:

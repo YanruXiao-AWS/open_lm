@@ -39,6 +39,21 @@ from webdataset.tariterators import (
 from webdataset.mix import RandomMix
 
 
+try:
+    import torch_xla.core.xla_model as xm
+    USE_XLA = True
+except:
+    USE_XLA = False
+
+try:
+    from neuronx_distributed.parallel_layers import parallel_state
+    USE_NXD = True
+    USE_NXD = False
+    print("USE_NXD is manually set to false in data.py")
+except:
+    USE_NXD = False
+
+
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
@@ -527,7 +542,21 @@ def get_synthetic_dataset(args, is_train, epoch, tokenizer, data_key, floor):
     print(f"{args.train_num_samples=}")
     dataset = SyntheticDataset(seq_len=args.seq_len, vocab_size=args.vocab_size, dataset_size=args.train_num_samples)
     print(f"{len(dataset)=}")
-    sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+    if USE_XLA:
+        if USE_NXD:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=parallel_state.get_data_parallel_world_size(),
+                rank=parallel_state.get_data_parallel_rank(),
+            )
+        else:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=args.world_size,
+                rank=args.rank,
+            )
+    else:
+        sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
 
     dataloader = DataLoader(

@@ -72,7 +72,11 @@ def init_distributed_device(args):
         import torch_xla.distributed.xla_backend
         os.environ['XLA_USE_BF16'] = '1' 
         # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --no_cache' + ' --log_level=ERROR' + ' -O1'
-        os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache'  + ' -O1'
+        if True:
+            os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache '  + ' -O1'
+        else:    
+            # speed_up_option = ' --auto-cast all --auto-cast-type bf16 --distribution-strategy llm-training'
+            os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache --auto-cast all --auto-cast-type bf16 --distribution-strategy llm-training'  + ' -O1'
     # For testing, allow forcing distributed mode to test distributed code path even on one gpu.
     if is_using_distributed() or args.force_distributed:
         if "SLURM_PROCID" in os.environ:
