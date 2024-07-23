@@ -48,8 +48,8 @@ except:
 try:
     from neuronx_distributed.parallel_layers import parallel_state
     USE_NXD = True
-    USE_NXD = False
-    print("USE_NXD is manually set to false in data.py")
+    # USE_NXD = False
+    # print("USE_NXD is manually set to false in data.py")
 except:
     USE_NXD = False
 
@@ -546,7 +546,7 @@ def get_synthetic_dataset(args, is_train, epoch, tokenizer, data_key, floor):
         if USE_NXD:
             sampler = DistributedSampler(
                 dataset,
-                num_replicas=parallel_state.get_data_parallel_world_size(),
+                num_replicas=parallel_state.get_data_parallel_size(),
                 rank=parallel_state.get_data_parallel_rank(),
             )
         else:

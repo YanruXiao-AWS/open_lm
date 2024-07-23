@@ -321,15 +321,20 @@ def save_checkpoint(
                     
                     if not COMPILE_MODEL:
                         if False and USE_NXD:
-                            # print("path: ", path, "P"*100)
+                            print("path: ", path, "P"*100)
                             parallel_layers.save(prefixes[prefix],
                                                 path)    
+
                         else:
                             print(f"Mark1: , rank: {args.rank} ", "M"*100)
-                            xm.save(
-                                prefixes[prefix],
-                                path,
-                            )
+                            if completed_epoch == args.epochs:
+                                pass
+                            else:
+                                xm.save(
+                                    prefixes[prefix],
+                                    path,
+                                )
+
                             print(f"Mark2: , rank: {args.rank} ", "M"*100)
                     else:
                         print("Compile model manually enabled in main.py. No save checkpoint.", "W"*100)
@@ -742,21 +747,39 @@ def main(args):
         no_decay_params = []  # to be potentially used later
         params = [p for n, p in named_parameters if p.requires_grad]
         
-        if False and USE_NXD:
-            # NOT TESTED
-            nxd_config = nxd.neuronx_distributed_config(
-                tensor_parallel_size=args.tensor_parallel_size,
-                optimizer_config={
-                },
-            )
-            param_groups =  \
+        if USE_NXD:
+            from neuronx_distributed.optimizer import NeuronZero1Optimizer
+            optimizer_grouped_parameters = \
                 [
                     {"params": no_decay_params, "weight_decay": 0.0},
                     {"params": params, "weight_decay": args.wd},
                 ]
-            optimizer = nxd.initialize_parallel_optimizer(
-                nxd_config, torch.optim.AdamW, param_groups, lr=args.lr, betas=(args.beta1, args.beta2),eps=args.eps,
+            
+            # Testing only - NxD wrapped Zero1Optimizer
+            optimizer = NeuronZero1Optimizer(
+                optimizer_grouped_parameters,
+                optim.AdamW,
+                lr=args.lr,
+                pin_layout=False,
+                sharding_groups=parallel_state.get_data_parallel_group(as_list=True),
+                grad_norm_groups=parallel_state.get_tensor_model_parallel_group(as_list=True),
             )
+            
+            
+            # NOT TESTED
+            # nxd_config = nxd.neuronx_distributed_config(
+            #     tensor_parallel_size=args.tensor_parallel_size,
+            #     optimizer_config={
+            #     },
+            # )
+            # param_groups =  \
+            #     [
+            #         {"params": no_decay_params, "weight_decay": 0.0},
+            #         {"params": params, "weight_decay": args.wd},
+            #     ]
+            # optimizer = nxd.initialize_parallel_optimizer(
+            #     nxd_config, torch.optim.AdamW, param_groups, lr=args.lr, betas=(args.beta1, args.beta2),eps=args.eps,
+            # )
             
         else:
             optimizer = optim.AdamW(
@@ -1106,13 +1129,22 @@ def main(args):
         else:
             logging.info("Final remote sync failed.")
     print(f"Epoch4: {epoch}, rank: {args.rank}", "E"*100)
-    # Final sync of all procs.
-    if args.distributed:
-        dist.barrier()
+    # # Final sync of all procs.
+    if args.dist_backend=="xla":
+        xm.rendezvous("Final sync")
+        # if args.distributed:
+        #     dist.barrier()
+    else:
+        if args.distributed:
+            dist.barrier()
+
+        
+
 
     cleanup(remote_sync_process, args.distributed)
-    # xm.rendezvous("wait_for_everyone_to_reach")
-    xm.mark_step()
+    print(f"Epoch5: {epoch}, rank: {args.rank}", "E"*100)
+    xm.rendezvous("wait_for_everyone_to_reach")
+    # xm.mark_step()
     return args
 
 
@@ -1144,7 +1176,7 @@ def _mp_fn(index, args):
     
     
     main(args)
-    xm.rendezvous("_mp_fn finished")
+    # xm.rendezvous("_mp_fn finished")
     return 
     
 # _mp_fn = main

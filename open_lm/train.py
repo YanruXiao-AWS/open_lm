@@ -373,21 +373,29 @@ def train_one_epoch(
         if USE_XLA:
            if args.world_size > 1:
                 # pass
-                print(f"Before: Rank: {args.rank}, GLT: {global_loss_tensor}", "B"*100)
-                xm.all_reduce(xm.REDUCE_SUM, global_loss_tensor) # buggy computation
-                # dist.all_reduce(global_loss_tensor, op=ReduceOp.SUM) # Compilation error
-                print(f"iter: {i}, rank: {args.rank}, GLT: {global_loss_tensor.item}")
-                global_loss_tensor /= args.world_size # for avg
-                if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
-                    for key, value in total_loss_avg.items():
-                        xm.all_reduce(xm.REDUCE_SUM, value)
-                        # dist.all_reduce(value, op=ReduceOp.SUM)
-                        value /= args.world_size # for avg
-                if args.moe_freq > 0:
-                    xm.all_reduce(xm.REDUCE_SUM, total_load_balancing_loss)
-                    # dist.all_reduce(total_load_balancing_loss, op=ReduceOp.SUM)
-                    total_load_balancing_loss /= args.world_size # for avg
-                print(f"After: Rank: {args.rank}, GLT: {global_loss_tensor}", "A"*100)
+                if USE_NXD: 
+                    # DP-only mode will trigger an error. - no confirmed reason. 
+                    global_loss_tensor = xm.all_reduce(
+                        xm.REDUCE_SUM, 
+                        global_loss_tensor,
+                        groups=parallel_state.get_data_parallel_group(as_list=True))
+                    global_loss_tensor /= args.world_size # for avg
+                    if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
+                        for key, value in total_loss_avg.items():
+                            total_loss_avg[key] = xm.all_reduce(
+                                xm.REDUCE_SUM, 
+                                value, 
+                                groups=parallel_state.get_data_parallel_group(as_list=True))
+                            total_loss_avg[key] /= args.world_size # for avg
+                    if args.moe_freq > 0:
+                        total_load_balancing_loss = xm.all_reduce(
+                            xm.REDUCE_SUM, 
+                            total_load_balancing_loss,
+                            groups=parallel_state.get_data_parallel_group(as_list=True))
+                        total_load_balancing_loss /= args.world_size # for avg
+                else:
+                    pass
+
         else:
             if args.world_size > 1:
 
