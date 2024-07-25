@@ -72,7 +72,9 @@ def init_distributed_device(args):
         import torch_xla.distributed.xla_backend
         os.environ['XLA_USE_BF16'] = '1' 
         # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --no_cache' + ' --log_level=ERROR' + ' -O1'
+        # if True:
         if True:
+            # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache '  + ' -O1'
             os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache '  + ' -O1'
         else:    
             # speed_up_option = ' --auto-cast all --auto-cast-type bf16 --distribution-strategy llm-training'
@@ -138,11 +140,10 @@ def init_distributed_device(args):
 def broadcast_object(args, obj, src=0):
     if args.rank == src:
         objects = [obj]
-        # print("obj src"+"#"*100)
+
     else:
         objects = [None]
-        # print("obj NONE "+"#"*100)
-    # print("obj: ", obj, "*"*100)
+
     dist.broadcast_object_list(objects, src=src)
     return objects[0]
 

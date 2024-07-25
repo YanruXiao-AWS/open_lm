@@ -95,8 +95,13 @@ except:
     # exit()
     pass
 
+
+COMPILE_MODEL = extract_graphs_only = os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None)
+if COMPILE_MODEL:
+    print("COMPILE_MODEL is set to True in main.py")
+# COMPILE_MODEL = False
 # COMPILE_MODEL = True
-COMPILE_MODEL = False
+# print("COMPILE_MODEL is manually set to True in main.py")
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
 
@@ -326,7 +331,7 @@ def save_checkpoint(
                                                 path)    
 
                         else:
-                            print(f"Mark1: , rank: {args.rank} ", "M"*100)
+                            # print(f"Mark1: , rank: {args.rank} ", "M"*100)
                             if completed_epoch == args.epochs:
                                 pass
                             else:
@@ -335,7 +340,7 @@ def save_checkpoint(
                                     path,
                                 )
 
-                            print(f"Mark2: , rank: {args.rank} ", "M"*100)
+                            # print(f"Mark2: , rank: {args.rank} ", "M"*100)
                     else:
                         print("Compile model manually enabled in main.py. No save checkpoint.", "W"*100)
                 else:
@@ -549,26 +554,46 @@ def main(args):
     else:
         # Optional: Use meta device
         if args.dist_backend=="xla":
+            
+            # nxd_config = nxd.neuronx_distributed_config(
+            #     tensor_parallel_size=args.tensor_parallel_size,
+            #     # optimizer_config={"zero_one_enabled": flags.use_zero_1, "grad_clipping": True, "max_grad_norm": 1.0},
+            #     # sequence_parallel=flags.sequence_parallel_enabled,
+            #     # activation_checkpoint_config=CoreAttention if flags.selective_checkpoint_enabled else "full",
+            #     model_init_config=None,
+            #     # mixed_precision_config=mixed_precision_config,
+            # )
+
+            # model = nxd.initialize_parallel_model(nxd_config, create_model, args, None)
+            # model.vocab_size = model.local_module().vocab_size
+            # model.seq_len = model.local_module().seq_len
+            
             model = create_model(args, None)
-            try:
-                import math
-                import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
-                def get_and_move_model_sequential(device, model, num_workers_per_step=1):
-                    local_rank = xm.get_local_ordinal()
-                    local_world_size = neuronx_dist_utils.get_local_world_size()
-                    for worker in range(math.ceil(local_world_size / num_workers_per_step)):
-                        if local_rank // num_workers_per_step == worker:
-                            # model = get_model()
-                            move_model_to_device(model, device)
-                        xm.rendezvous("get_and_move_model_sequential" + str(worker))
-                    return model
+            nxd.utils.model_utils.move_model_to_device(
+                model, 
+                xm.xla_device())
+            
+            # try:
+            #     import math
+            #     import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
+            #     def get_and_move_model_sequential(device, model, num_workers_per_step=11):
+            #         local_rank = xm.get_local_ordinal()
+            #         local_world_size = neuronx_dist_utils.get_local_world_size()
+            #         for worker in range(math.ceil(local_world_size / num_workers_per_step)):
+            #             if local_rank // num_workers_per_step == worker:
+            #                 # model = get_model()
+            #                 model = create_model(args, None)
+            #                 nxd.utils.model_utils.move_model_to_device(model, device)
+            #             xm.rendezvous("get_and_move_model_sequential" + str(worker))
+            #         return model
                 
-                # get_and_move_model_sequential(device, model, 4)
-                parallel_layers.move_model_to_device(model, device)
-            except Exception as e:
-                print("Found error:", e)
-                exit()
-                model = model.to(args.device)
+            #     model = get_and_move_model_sequential(xm.xla_device(), model, 11)
+            #     # print("MODEL MOVED", "M"*100)
+            #     # parallel_layers.move_model_to_device(model, device)
+            # except Exception as e:
+            #     print("Found error:", e)
+            #     exit()
+            #     model = model.to(args.device)
         else:
             with torch.device("meta" if args.experimental_meta_device and args.fsdp else args.device):
                 model = create_model(args, tensor_parallel_group)
@@ -748,22 +773,34 @@ def main(args):
         params = [p for n, p in named_parameters if p.requires_grad]
         
         if USE_NXD:
-            from neuronx_distributed.optimizer import NeuronZero1Optimizer
-            optimizer_grouped_parameters = \
+            optimizer = optim.AdamW(
                 [
                     {"params": no_decay_params, "weight_decay": 0.0},
                     {"params": params, "weight_decay": args.wd},
-                ]
-            
-            # Testing only - NxD wrapped Zero1Optimizer
-            optimizer = NeuronZero1Optimizer(
-                optimizer_grouped_parameters,
-                optim.AdamW,
+                ],
                 lr=args.lr,
-                pin_layout=False,
-                sharding_groups=parallel_state.get_data_parallel_group(as_list=True),
-                grad_norm_groups=parallel_state.get_tensor_model_parallel_group(as_list=True),
+                betas=(args.beta1, args.beta2),
+                eps=args.eps,
             )
+            
+            # from neuronx_distributed.optimizer import NeuronZero1Optimizer
+            # optimizer_grouped_parameters = \
+            #     [
+            #         {"params": no_decay_params, "weight_decay": 0.0},
+            #         {"params": params, "weight_decay": args.wd},
+            #     ]
+            
+            # # Testing only - NxD wrapped Zero1Optimizer
+            # optimizer = NeuronZero1Optimizer(
+            #     optimizer_grouped_parameters,
+            #     optim.AdamW,
+            #     lr=args.lr,
+            #     pin_layout=False,
+            #     sharding_groups=parallel_state.get_data_parallel_group(as_list=True),
+            #     grad_norm_groups=parallel_state.get_tensor_model_parallel_group(as_list=True),
+            # )
+            
+
             
             
             # NOT TESTED
@@ -960,7 +997,7 @@ def main(args):
                 args, True, epoch, force_num_samples=num_samples_per_source, data_key=args.data_key, floor=True
             )
         
-        print("Epoch: ", epoch, "E"*100)
+        # print("Epoch: ", epoch, "E"*100)
             
         if args.dist_backend=="xla":
             class MpDeviceLoader(pl.MpDeviceLoader):
@@ -973,8 +1010,8 @@ def main(args):
             else:
                 
                 
-                print("loader: ", data["train"].dataloader, "L"*100)
-                print("loader: ", data["train"].web_dataloader, "WL"*100)
+                # print("loader: ", data["train"].dataloader, "L"*100)
+                # print("loader: ", data["train"].web_dataloader, "WL"*100)
                 
                 data["train"].dataloader = MpDeviceLoader(data["train"].web_dataloader, device)
 
@@ -1019,7 +1056,7 @@ def main(args):
         steps_done_epoch = global_step - prev_step
         samples_seen = samples_seen + steps_done_epoch * args.global_batch_size
 
-        print("global_step: ", done_training, steps_done_epoch, global_step, prev_step, "S"*500)
+        # print("global_step: ", done_training, steps_done_epoch, global_step, prev_step, "S"*500)
         
         if not success:
             logging.info("Training exiting due to NaN value")
@@ -1036,7 +1073,6 @@ def main(args):
                 logging.warning(
                     f"Epoch {epoch}, tokens seen: {steps_done_epoch * args.global_batch_size * args.seq_len}, tokens expected: {expected_steps * args.global_batch_size * args.seq_len}, ratio: {steps_done_epoch / expected_steps}"
                 )
-                # logging.warning("MMMMM"*1000)
 
         epoch = epoch + 1
         evaluation_metrics = []
@@ -1081,7 +1117,7 @@ def main(args):
         if USE_XLA and COMPILE_MODEL:
             pass
         else:
-            print(f"Epoch1: {epoch}, rank: {args.rank} ", "E"*100)
+            # print(f"Epoch1: {epoch}, rank: {args.rank} ", "E"*100)
             # Saving checkpoints.
             save_checkpoint(
                 args,
@@ -1113,7 +1149,7 @@ def main(args):
 
     if args.wandb and is_master(args):
         wandb.finish()
-    print(f"Epoch3: {epoch}, rank: {args.rank} ", "E"*100)
+    # print(f"Epoch3: {epoch}, rank: {args.rank} ", "E"*100)
     # run a final sync.
     if remote_sync_process is not None:
         logging.info("Final remote sync.")
@@ -1128,7 +1164,7 @@ def main(args):
             logging.info("Final remote sync successful.")
         else:
             logging.info("Final remote sync failed.")
-    print(f"Epoch4: {epoch}, rank: {args.rank}", "E"*100)
+    # print(f"Epoch4: {epoch}, rank: {args.rank}", "E"*100)
     # # Final sync of all procs.
     if args.dist_backend=="xla":
         xm.rendezvous("Final sync")
@@ -1166,6 +1202,7 @@ def copy_codebase(args):
 
 def _mp_fn(index, args):
     try:
+        # pass
         parallel_state.initialize_model_parallel(
             tensor_model_parallel_size=args.tensor_parallel_size,
                                                 )
@@ -1192,11 +1229,7 @@ if __name__ == "__main__":
     if args.dist_backend=="xla":
         
         if os.environ.get("WORLD_SIZE"):
-            if NO_DP:
-                args.world_group = dist.init_process_group('xla')
-                pass
-            else:
-                args.world_group = dist.init_process_group('xla')
+            args.world_group = dist.init_process_group("xla")
             _mp_fn(0, args)
         else:
             print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)

@@ -176,6 +176,7 @@ class CustomAttn(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
+        # if True or USE_NXD:
         if USE_NXD:
             self.in_proj = ColumnParallelLinear(args.dim, 
                                                 3 * args.n_heads * self.head_dim, 
@@ -216,6 +217,7 @@ class CustomAttn(nn.Module):
 
         self.layer_id = layer_id
         self.dim = args.dim
+        # if True or USE_NXD:
         if USE_NXD:
             # update the number of head and dim, as we shard tensor using TP. 
             tp_size = parallel_state.get_tensor_model_parallel_size()
@@ -309,6 +311,7 @@ class SwiGLUTorch(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args: Params = Params, bias=True):
         super().__init__()
         if USE_NXD:
+        # if True or USE_NXD:
             self.w12 = ColumnParallelLinear(in_dim, 
                                             2 * hidden_dim, 
                                             bias=bias,
@@ -438,7 +441,6 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-        # if False and USE_NXD:
         if USE_NXD:
             self.tok_embeddings = ParallelEmbedding(
                 num_embeddings=params.vocab_size,
@@ -463,18 +465,18 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             eps=params.norm_eps,
         )
         if USE_NXD:
-            # self.output = ColumnParallelLinear(params.dim, params.vocab_size, bias=False)
-            # self.output = ColumnParallelLinear(
-            #     params.dim, 
-            #     params.vocab_size,
-            #     bias=False,
-            #     gather_output=True).to('xla')
-            self.output = RowParallelLinear(
+            self.output = ColumnParallelLinear(
                 params.dim, 
                 params.vocab_size,
                 bias=False,
-                input_is_parallel=False,
+                gather_output=True
             ).to('xla')
+            # self.output = RowParallelLinear(
+            #     params.dim, 
+            #     params.vocab_size,
+            #     bias=False,
+            #     input_is_parallel=False,
+            # ).to('xla')
         else:
             self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
             

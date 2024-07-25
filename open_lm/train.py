@@ -51,8 +51,8 @@ except:
 try:
     from neuronx_distributed.parallel_layers import parallel_state
     USE_NXD = True
-    USE_NXD = False
-    print("USE_NXD is manually set to false in train.py")
+    # USE_NXD = False
+    # print("USE_NXD is manually set to false in train.py")
 except:
     USE_NXD = False
     
@@ -69,11 +69,7 @@ def backward(total_loss, scaler):
     if scaler is not None:
         scaler.scale(total_loss).backward()
     else:
-        # print("Total loss is:, ", total_loss, total_loss.shape, "LOSS"*100)
-        if USE_NXD:
-            total_loss.mean().backward()
-        else:
-            total_loss.backward()
+        total_loss.backward()
 
 
 def train_one_epoch(
@@ -178,7 +174,8 @@ def train_one_epoch(
             has_data = torch.tensor(int(args.rank)+5, dtype=torch.long, device=device) * 10
         except StopIteration:
             has_data = torch.tensor(0, dtype=torch.long, device=device)
-            break
+            if USE_XLA:
+                break
     
         
         if args.world_size > 1:
@@ -216,15 +213,15 @@ def train_one_epoch(
                     logit_m.update(torch.mean(out).item())
                 total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
                 # print("total_lm_loss: ", total_lm_loss, "LMLOSS"*100 )
-                if USE_XLA:
-                    # xm.mark_step() # Somehow it is important; removing it makes an error. Adding it may result in hang. 
-                    pass
+
                 total_loss = total_lm_loss
                 if args.moe_freq > 0:
                     total_load_balancing_loss = batched_load_balancing_loss(moe_args)
                     clear_load_balancing_loss()
                     total_loss += total_load_balancing_loss
 
+            if USE_NXD:
+                total_loss = torch.mean(total_loss)
             backward_start = time.time()
             backward(total_loss, scaler)
             backward_time_m.update(time.time() - backward_start)
@@ -359,7 +356,7 @@ def train_one_epoch(
             averagers.step()
 
         if USE_NXD:
-            global_loss_tensor = total_loss.detach().clone().mean()
+            global_loss_tensor = total_loss.detach().clone()
             # print("LOSS: ", global_loss_tensor, "GLT"*100 )
             # xm.mark_step()
         else:
@@ -373,7 +370,8 @@ def train_one_epoch(
         if USE_XLA:
            if args.world_size > 1:
                 # pass
-                if USE_NXD: 
+                if False and USE_NXD: 
+                # if USE_NXD:
                     # DP-only mode will trigger an error. - no confirmed reason. 
                     global_loss_tensor = xm.all_reduce(
                         xm.REDUCE_SUM, 

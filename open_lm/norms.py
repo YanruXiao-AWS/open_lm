@@ -22,9 +22,8 @@ try:
         layer_norm,
     )
     USE_NXD = True
-    # print("NXD Layer Norm used", "NXD"*100)
-    USE_NXD = False
-    print("USE_NXD is manually set to false in norms.py")
+    # USE_NXD = False
+    # print("USE_NXD is manually set to false in norms.py")
 
 except:
     USE_NXD = False
