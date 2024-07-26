@@ -99,9 +99,7 @@ except:
 COMPILE_MODEL = extract_graphs_only = os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None)
 if COMPILE_MODEL:
     print("COMPILE_MODEL is set to True in main.py")
-# COMPILE_MODEL = False
-# COMPILE_MODEL = True
-# print("COMPILE_MODEL is manually set to True in main.py")
+
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
 
@@ -571,7 +569,7 @@ def main(args):
             model = create_model(args, None)
             nxd.utils.model_utils.move_model_to_device(
                 model, 
-                xm.xla_device())
+                args.device)
             
             # try:
             #     import math
@@ -800,24 +798,6 @@ def main(args):
             #     grad_norm_groups=parallel_state.get_tensor_model_parallel_group(as_list=True),
             # )
             
-
-            
-            
-            # NOT TESTED
-            # nxd_config = nxd.neuronx_distributed_config(
-            #     tensor_parallel_size=args.tensor_parallel_size,
-            #     optimizer_config={
-            #     },
-            # )
-            # param_groups =  \
-            #     [
-            #         {"params": no_decay_params, "weight_decay": 0.0},
-            #         {"params": params, "weight_decay": args.wd},
-            #     ]
-            # optimizer = nxd.initialize_parallel_optimizer(
-            #     nxd_config, torch.optim.AdamW, param_groups, lr=args.lr, betas=(args.beta1, args.beta2),eps=args.eps,
-            # )
-            
         else:
             optimizer = optim.AdamW(
                 [
@@ -943,7 +923,7 @@ def main(args):
         cleanup(remote_sync_process, args.distributed)
         return
 
-    if False and USE_NXD:
+    if USE_NXD:
         loss = parallel_layers.loss_functions.parallel_cross_entropy
     else:
         loss = torch.nn.CrossEntropyLoss()
@@ -1008,8 +988,7 @@ def main(args):
             if NO_DP:
                 pass
             else:
-                
-                
+                                
                 # print("loader: ", data["train"].dataloader, "L"*100)
                 # print("loader: ", data["train"].web_dataloader, "WL"*100)
                 
@@ -1049,7 +1028,7 @@ def main(args):
             if args.distributed:
                 dist.barrier()
 
-        if COMPILE_MODEL:
+        if False and COMPILE_MODEL:
             done_training = (global_step >= total_steps) or (epoch >= args.epochs)
         else:
             done_training = global_step >= total_steps
@@ -1201,16 +1180,12 @@ def copy_codebase(args):
 
 
 def _mp_fn(index, args):
-    try:
+
         # pass
-        parallel_state.initialize_model_parallel(
-            tensor_model_parallel_size=args.tensor_parallel_size,
-                                                )
-        args.data_parallel_size = parallel_state.get_data_parallel_size()
-        
-    except:
-        pass
-    
+    parallel_state.initialize_model_parallel(
+        tensor_model_parallel_size=args.tensor_parallel_size,
+                                            )
+    args.data_parallel_size = parallel_state.get_data_parallel_size()    
     
     main(args)
     # xm.rendezvous("_mp_fn finished")

@@ -176,8 +176,8 @@ class CustomAttn(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        # if True or USE_NXD:
-        if USE_NXD:
+        if True or USE_NXD:
+        # if USE_NXD:
             self.in_proj = ColumnParallelLinear(args.dim, 
                                                 3 * args.n_heads * self.head_dim, 
                                                 bias=False,
@@ -217,8 +217,8 @@ class CustomAttn(nn.Module):
 
         self.layer_id = layer_id
         self.dim = args.dim
-        # if True or USE_NXD:
-        if USE_NXD:
+        if True or USE_NXD:
+        # if USE_NXD:
             # update the number of head and dim, as we shard tensor using TP. 
             tp_size = parallel_state.get_tensor_model_parallel_size()
             # print("tp_size: ", tp_size, "TPSIZE"*100)
@@ -310,8 +310,8 @@ class GemmaMLP(nn.Module):
 class SwiGLUTorch(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args: Params = Params, bias=True):
         super().__init__()
-        if USE_NXD:
-        # if True or USE_NXD:
+        # if USE_NXD:
+        if True or USE_NXD:
             self.w12 = ColumnParallelLinear(in_dim, 
                                             2 * hidden_dim, 
                                             bias=bias,
@@ -441,7 +441,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-        if USE_NXD:
+        if True or USE_NXD:
             self.tok_embeddings = ParallelEmbedding(
                 num_embeddings=params.vocab_size,
                 embedding_dim=params.dim
@@ -464,7 +464,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             params.dim,
             eps=params.norm_eps,
         )
-        if USE_NXD:
+        if True or USE_NXD:
             self.output = ColumnParallelLinear(
                 params.dim, 
                 params.vocab_size,
