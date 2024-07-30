@@ -1028,10 +1028,8 @@ def main(args):
             if args.distributed:
                 dist.barrier()
 
-        if False and COMPILE_MODEL:
-            done_training = (global_step >= total_steps) or (epoch >= args.epochs)
-        else:
-            done_training = global_step >= total_steps
+
+        done_training = global_step >= total_steps
         steps_done_epoch = global_step - prev_step
         samples_seen = samples_seen + steps_done_epoch * args.global_batch_size
 

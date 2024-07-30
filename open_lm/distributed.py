@@ -75,7 +75,9 @@ def init_distributed_device(args):
         # if True:
         if True:
             # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache '  + ' -O1'
-            os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache '  + ' -O1'
+            pass
+            # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache '  + ' -O1'
+            # os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../new_compiler_cache '  + ' -O1'
         else:    
             # speed_up_option = ' --auto-cast all --auto-cast-type bf16 --distribution-strategy llm-training'
             os.environ['NEURON_CC_FLAGS'] = os.environ.get('NEURON_CC_FLAGS', '') + ' --log_level=ERROR --cache_dir=../compiler_cache --auto-cast all --auto-cast-type bf16 --distribution-strategy llm-training'  + ' -O1'

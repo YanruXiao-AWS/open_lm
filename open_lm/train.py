@@ -132,11 +132,16 @@ def train_one_epoch(
 
     end = time.time()
     if USE_XLA:
-        # data loading without the all_reduce
+        # if args.moe_freq > 0:
+        # # these MoEArgs are necessary for logging load balancing.
+        #     if USE_XLA:
+        #         raise Exception("TODO: MoE Behaviour on AWS Neuron is undefined. ")
+        
+        
         for i, batch in enumerate(dataloader):
             if not args.skip_scheduler:
                 scheduler(step)
-                
+            
 
 
             (texts,) = batch
@@ -272,8 +277,8 @@ def train_one_epoch(
             step += 1
             
             if USE_XLA:
-                # global_loss_tensor_item = global_loss_tensor_reduced_detached.cpu().item() # stuck here for 32 cores
-                global_loss_tensor_item = -0.8888
+                global_loss_tensor_item = global_loss_tensor_reduced_detached.cpu().item() # stuck here for 32 cores
+                # global_loss_tensor_item = -0.8888
             else:
                 global_loss_tensor_item = global_loss_tensor_item
             if is_master(args):
