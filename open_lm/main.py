@@ -567,6 +567,8 @@ def main(args):
             # model.seq_len = model.local_module().seq_len
             
             model = create_model(args, None)
+            # model = model.to(torch.bfloat16)
+            
             nxd.utils.model_utils.move_model_to_device(
                 model, 
                 args.device)
@@ -808,10 +810,10 @@ def main(args):
                 betas=(args.beta1, args.beta2),
                 eps=args.eps,
             )
-        scaler = None
-        if args.precision == "amp":
-            assert not args.fsdp, "FSDP not supported with amp, only amp_bfloat16"
-            scaler = GradScaler()
+            scaler = None
+            if args.precision == "amp":
+                assert not args.fsdp, "FSDP not supported with amp, only amp_bfloat16"
+                scaler = GradScaler()
 
     # initialize datasets
     # use tokenizer=None because the data is already pre-tokenized.
@@ -1179,12 +1181,20 @@ def copy_codebase(args):
 
 def _mp_fn(index, args):
 
-        # pass
+        
+    # pass
     parallel_state.initialize_model_parallel(
         tensor_model_parallel_size=args.tensor_parallel_size,
                                             )
     args.data_parallel_size = parallel_state.get_data_parallel_size()    
-    
+    if COMPILE_MODEL:
+        # No log report to
+        args.name = "open_lm_ex_trn_compile"
+        args.report_to = ""
+        
+
+        
+    # with xp.Trace("all steps"):
     main(args)
     # xm.rendezvous("_mp_fn finished")
     return 
@@ -1201,13 +1211,22 @@ if __name__ == "__main__":
     # print(sys.argv[1:])
     if args.dist_backend=="xla":
         
-        if os.environ.get("WORLD_SIZE"):
-            args.world_group = dist.init_process_group("xla")
-            _mp_fn(0, args)
-        else:
-            print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
-            xmp.spawn(_mp_fn, args=(args,))
-        
+        from torch_neuronx.experimental import profiler
+        import torch_xla.debug.profiler as xp
+
+        with profiler.profile(
+            port=9012,
+            neuron_tensorboard_plugin_dir='logs_neuron/plugins/neuron',
+            profile_type='trace',
+            ms_duration=1500000 ) as profiler:
+    
+            if os.environ.get("WORLD_SIZE"):
+                args.world_group = dist.init_process_group("xla")
+                _mp_fn(0, args)
+            else:
+                print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
+                xmp.spawn(_mp_fn, args=(args,))
+            
         # args.world_group = dist.init_process_group('xla')
         # xmp.spawn(_mp_fn, args=(args,))
         

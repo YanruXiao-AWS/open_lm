@@ -77,8 +77,8 @@ try:
     from neuronx_distributed.utils.model_utils import move_model_to_device
     from neuronx_distributed.parallel_layers import parallel_state
     USE_NXD = True 
-    USE_NXD = False
-    print("USE_NXD is manually set to false in model.py")
+    # USE_NXD = False
+    # print("USE_NXD is manually set to false in model.py")
 
 except Exception as e:
     USE_NXD = False
@@ -176,8 +176,8 @@ class CustomAttn(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        if True or USE_NXD:
-        # if USE_NXD:
+        # if True or USE_NXD:
+        if USE_NXD:
             self.in_proj = ColumnParallelLinear(args.dim, 
                                                 3 * args.n_heads * self.head_dim, 
                                                 bias=False,
@@ -217,8 +217,8 @@ class CustomAttn(nn.Module):
 
         self.layer_id = layer_id
         self.dim = args.dim
-        if True or USE_NXD:
-        # if USE_NXD:
+        # if True or USE_NXD:
+        if USE_NXD:
             # update the number of head and dim, as we shard tensor using TP. 
             tp_size = parallel_state.get_tensor_model_parallel_size()
             # print("tp_size: ", tp_size, "TPSIZE"*100)
@@ -310,8 +310,8 @@ class GemmaMLP(nn.Module):
 class SwiGLUTorch(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, args: Params = Params, bias=True):
         super().__init__()
-        # if USE_NXD:
-        if True or USE_NXD:
+        if USE_NXD:
+        # if True or USE_NXD:
             self.w12 = ColumnParallelLinear(in_dim, 
                                             2 * hidden_dim, 
                                             bias=bias,
@@ -441,7 +441,8 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-        if True or USE_NXD:
+        # if True or USE_NXD:
+        if USE_NXD:
             self.tok_embeddings = ParallelEmbedding(
                 num_embeddings=params.vocab_size,
                 embedding_dim=params.dim
@@ -464,14 +465,17 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             params.dim,
             eps=params.norm_eps,
         )
-        if True or USE_NXD:
+        # if True or USE_NXD:
+        if USE_NXD:
             self.output = ColumnParallelLinear(
                 params.dim, 
                 params.vocab_size,
                 bias=False,
                 gather_output=True
+                # gather_output=False # has to be True
             ).to('xla')
-            # self.output = RowParallelLinear(
+            # print("self.norm", type(self.norm), "N"*100)
+            # self.output = RowParallelLinear( # slow
             #     params.dim, 
             #     params.vocab_size,
             #     bias=False,
@@ -508,10 +512,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
                 token for sequence s.
         """
         if input_ids is not None:
-            # print("input_ids"+str(input_ids.shape), "X"*100)
             x = self.tok_embeddings(input_ids)
-            # print(str(x.shape),"X2"*100)
-            # print(self.tok_embeddings.weight.shape,"X3"*100)
             
         elif inputs_embeds is not None:
             x = inputs_embeds
@@ -533,7 +534,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             past_key_values = None
         x = self.norm(x)
         # print(type(self.norm), "norm"*100)
-        # print(x.shape,"X4"*100)
+
         output = self.output(x)
         # print(self.output.weight.shape,"X5"*100)
         # follow llama in casting this to float.

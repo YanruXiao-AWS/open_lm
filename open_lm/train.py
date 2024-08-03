@@ -45,6 +45,7 @@ except ImportError as ie:
 try:
     import torch_xla.core.xla_model as xm
     USE_XLA = True
+    import torch_xla.debug.profiler as xp
 except:
     USE_XLA = False
     
@@ -139,28 +140,36 @@ def train_one_epoch(
         
         
         for i, batch in enumerate(dataloader):
-            if not args.skip_scheduler:
-                scheduler(step)
-            
-
-
-            (texts,) = batch
-            
-            if USE_XLA:
-                texts = torch.LongTensor(texts.to('cpu')) # extra step to eliminate a torch bug
-                texts = texts.to(device)
-            else:
-                texts = torch.LongTensor(texts).to(device)
-            
-            data_time_m.update(time.time() - end)
-            optimizer.zero_grad()
+            # with xp.StepTrace("data_loading", step_num=50):
+            with xp.Trace("data_loading"):
+                if not args.skip_scheduler:
+                    scheduler(step)
+                
+                get_data_time = time.time()
+                # xm.master_print(f"Get data time: {get_data_time - end} at iter {i}, ", "G"*100)
+                (texts,) = batch
+                
+                if USE_XLA:
+                    # texts = torch.LongTensor(texts.to('cpu')) # extra step to eliminate a torch bug
+                    texts = texts.to(device)
+                else:
+                    texts = torch.LongTensor(texts).to(device)
+                convert_data_time = time.time()
+                # xm.master_print(f"Convert data time: {convert_data_time - get_data_time} at iter {i}, ", "C"*100)
+                data_time_m.update(time.time() - end)
+            # with xp.StepTrace("optimizer zero grad", step_num=50):   
+            with xp.Trace("optimizer zero grad"):
+                optimizer.zero_grad()
+        
             if args.accum_freq == 1:
                 with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                     using_te and args.use_fp8
-                ) else autocast() if not USE_XLA else torch.autocast("xla"):
+                ) else autocast() if not USE_XLA else nullcontext(): #torch.autocast("xla"):
                     forward_start = time.time()
                     inputs, targets = sample_chunk(texts, args)
-                    out, _, _ = model(inputs)
+                    # with xp.StepTrace("forward step", step_num=50): 
+                    with xp.Trace("forward step"):
+                        out, _, _ = model(inputs)
                     forward_time_m.update(time.time() - forward_start)
 
                     if args.log_logit_mean:
@@ -173,12 +182,13 @@ def train_one_epoch(
                         total_load_balancing_loss = batched_load_balancing_loss(moe_args)
                         clear_load_balancing_loss()
                         total_loss += total_load_balancing_loss
-
-                if USE_NXD:
-                    total_loss = torch.mean(total_loss)
-                backward_start = time.time()
-                backward(total_loss, scaler)
-                backward_time_m.update(time.time() - backward_start)
+                # with xp.StepTrace("backward step", step_num=50): 
+                with xp.Trace("backward step"):
+                    if USE_NXD:
+                        total_loss = torch.mean(total_loss)
+                    backward_start = time.time()
+                    backward(total_loss, scaler)
+                    backward_time_m.update(time.time() - backward_start)
                 if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                     with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                         using_te and args.use_fp8
@@ -189,8 +199,103 @@ def train_one_epoch(
                                 # save the loss for the average model for logging
                                 total_loss_avg[key] = loss(out_avg.reshape(-1, args.vocab_size), targets.reshape(-1))
             else:
-                raise Exception("TODO: accum_freq>1 on AWS Neuron is implemented yet.")
-            
+                # raise Exception("TODO: accum_freq>1 on AWS Neuron is implemented yet.")
+                # split up batch into accum_freq chunks -- if you have --batch-size 8 and --accum-freq 4
+                # then you only process 2 items at a time. batch-size must be divisible by accume-freq.
+                assert args.per_gpu_batch_size % args.accum_freq == 0, "Per-GPU batch size must be divisible by accum_freq"
+                per_batch = args.per_gpu_batch_size // args.accum_freq
+
+                inputs, targets = sample_chunk(texts, args)
+
+                forward_total_time = 0
+                backward_total_time = 0
+                for ii in range(args.accum_freq):
+                    maybe_no_sync = nullcontext
+                    # Don't sync gradients until the final batch for FSDP.
+                    if isinstance(model, FSDP) and ii != args.accum_freq - 1:
+                        maybe_no_sync = model.no_sync
+                    with maybe_no_sync():
+                        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
+                            using_te and args.use_fp8
+                        ) else autocast() if not USE_XLA else torch.autocast("xla"):
+                            forward_start = time.time()
+                            inputs_ii = inputs[ii * per_batch : (ii + 1) * per_batch]
+                            if inputs_ii.shape[0] == 0:
+                                break
+                            targets_ii = targets[ii * per_batch : (ii + 1) * per_batch]
+
+                            out, _, _ = model(inputs_ii)
+                            forward_total_time += time.time() - forward_start
+
+                            if args.log_logit_mean:
+                                logit_m.update(torch.mean(out).item())
+
+                            local_lm_loss = (
+                                loss(out.reshape(-1, args.vocab_size), targets_ii.reshape(-1))
+                                * inputs_ii.shape[0]
+                                / inputs.shape[0]
+                            )
+                            if USE_NXD:
+                                local_lm_loss = torch.mean(local_lm_loss)
+                        local_loss = local_lm_loss
+                        if args.moe_freq > 0:
+                            local_load_balancing_loss = batched_load_balancing_loss(moe_args)
+                            clear_load_balancing_loss()
+                            local_loss += local_load_balancing_loss
+                        # if USE_NXD:
+                        #     local_loss = torch.mean(local_loss)
+                        backward_start = time.time()
+                        # print("Local_loss, scaler:", local_loss, scaler, "L"*100)
+                        backward(local_loss, scaler)
+                        backward_total_time += time.time() - backward_start
+                        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
+                            using_te and args.use_fp8
+                        ) else autocast() if not USE_XLA else torch.autocast("xla"):
+                            if (
+                                averagers is not None
+                                and args.log_avg_model_training_loss
+                                and i % args.log_avg_model_training_loss == 0
+                            ):
+                                for key, averager in averagers.avgs_dict.items():
+                                    with torch.no_grad():
+                                        out_avg, _, _ = averager.av_model(inputs_ii)
+                                        if USE_NXD:
+                                            local_avg_losses[key] = (
+                                                torch.mean(loss(out_avg.reshape(-1, args.vocab_size), targets_ii.reshape(-1)))
+                                                * inputs_ii.shape[0]
+                                                / inputs.shape[0]
+                                            )
+                                        
+                    if ii == 0:
+                        total_lm_loss = local_lm_loss
+                        if args.moe_freq > 0:
+                            total_load_balancing_loss = local_load_balancing_loss
+                        if (
+                            averagers is not None
+                            and args.log_avg_model_training_loss
+                            and i % args.log_avg_model_training_loss == 0
+                        ):
+                            for key, averager in averagers.avgs_dict.items():
+                                total_loss_avg[key] = local_avg_losses[key]
+                    else:
+                        total_lm_loss += local_lm_loss
+                        if args.moe_freq > 0:
+                            total_load_balancing_loss += local_load_balancing_loss
+                        if (
+                            averagers is not None
+                            and args.log_avg_model_training_loss
+                            and i % args.log_avg_model_training_loss == 0
+                        ):
+                            for key, averager in averagers.avgs_dict.items():
+                                total_loss_avg[key] += local_avg_losses[key]
+
+                forward_time_m.update(forward_total_time)
+                backward_time_m.update(backward_total_time)
+
+                total_loss = total_lm_loss
+                if args.moe_freq > 0:
+                    total_loss += total_load_balancing_loss
+
             
             
             if averagers is not None:
@@ -205,65 +310,78 @@ def train_one_epoch(
                     total_loss_avg[key] = value.detach().clone()
             
             sync_start = time.time()
-            if USE_XLA:
-                if args.world_size > 1:
-                    if USE_NXD:
-                        xm.mark_step()            
-                        # DP-only mode will trigger an error. - no confirmed reason. 
-                        global_loss_tensor /= args.world_size # for avg
-                        global_loss_tensor_reduced = xm.all_reduce(
-                            xm.REDUCE_SUM, 
-                            global_loss_tensor,
-                            groups=parallel_state.get_data_parallel_group(as_list=True))
+            ##### xm.mark_step()
+            # if USE_XLA:
+            #     do_sync_flag = True
+            #     # do_sync_flag = False
+            #     if not do_sync_flag and i == 0:
+            #         xm.master_print("do_sync_flag set to False. Not do all_reduce -for profiling.")
+            #     if do_sync_flag and args.world_size > 1 :
+            #         if USE_NXD:
+            #             xm.mark_step()            
+            #             # DP-only mode will trigger an error. - no confirmed reason. 
+            #             global_loss_tensor /= args.world_size # for avg
+            #             global_loss_tensor_reduced = xm.all_reduce(
+            #                 xm.REDUCE_SUM, 
+            #                 global_loss_tensor,
+            #                 groups=parallel_state.get_data_parallel_group(as_list=True))
                         
-                        global_loss_tensor_reduced_detached = global_loss_tensor_reduced.detach()
-                        # if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
-                        #     for key, value in total_loss_avg.items():
-                        #         total_loss_avg[key] /= args.world_size # for avg
-                        #         total_loss_avg[key] = xm.all_reduce(
-                        #             xm.REDUCE_SUM, 
-                        #             value, 
-                        #             groups=parallel_state.get_data_parallel_group(as_list=True))
+            #             global_loss_tensor_reduced_detached = global_loss_tensor_reduced.detach()
+            #             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
+            #                 for key, value in total_loss_avg.items():
+            #                     total_loss_avg[key] /= args.world_size # for avg
+            #                     total_loss_avg[key] = xm.all_reduce(
+            #                         xm.REDUCE_SUM, 
+            #                         value, 
+            #                         groups=parallel_state.get_data_parallel_group(as_list=True))
                                 
-                        # if args.moe_freq > 0:
-                        #     total_load_balancing_loss /= args.world_size # for avg
-                        #     total_load_balancing_loss = xm.all_reduce(
-                        #         xm.REDUCE_SUM, 
-                        #         total_load_balancing_loss,
-                        #         groups=parallel_state.get_data_parallel_group(as_list=True))
+            #             if args.moe_freq > 0:
+            #                 total_load_balancing_loss /= args.world_size # for avg
+            #                 total_load_balancing_loss = xm.all_reduce(
+            #                     xm.REDUCE_SUM, 
+            #                     total_load_balancing_loss,
+            #                     groups=parallel_state.get_data_parallel_group(as_list=True))
                             
 
 
-            else:
-                if args.world_size > 1:
+            # else:
+            #     if args.world_size > 1:
 
-                    dist.all_reduce(global_loss_tensor, op=ReduceOp.AVG)
-                    if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
-                        for key, value in total_loss_avg.items():
-                            dist.all_reduce(value, op=ReduceOp.AVG)
-                    if args.moe_freq > 0:
-                        dist.all_reduce(total_load_balancing_loss, op=ReduceOp.AVG)
+            #         dist.all_reduce(global_loss_tensor, op=ReduceOp.AVG)
+            #         if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
+            #             for key, value in total_loss_avg.items():
+            #                 dist.all_reduce(value, op=ReduceOp.AVG)
+            #         if args.moe_freq > 0:
+            #             dist.all_reduce(total_load_balancing_loss, op=ReduceOp.AVG)
             sync_time_m.update(time.time() - sync_start)
 
             
                       
             optim_step_start = time.time()
             
-            
-            if False and scaler is not None:
-                if args.grad_clip_norm is not None:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                if args.grad_clip_norm is not None:
-                    if isinstance(model, FSDP):
-                        model.clip_grad_norm_(args.grad_clip_norm, norm_type=2.0)
-                    else:
+            # with xp.StepTrace("optimizer step", num_step=50): 
+            with xp.Trace("optimizer step"): 
+                if scaler is not None:
+                    if args.grad_clip_norm is not None:
+                        scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    if args.grad_clip_norm is not None:
+                        if isinstance(model, FSDP):
+                            model.clip_grad_norm_(args.grad_clip_norm, norm_type=2.0)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                    
+                    optimizer.step()
                 
-                optimizer.step()
+                # if USE_NXD:
+                #     # print("Use xm optimizer step")
+                #     xm.optimizer_step(
+                #         optimizer,
+                #         groups=parallel_state.get_data_parallel_group(as_list=True)
+                #     )
                 optimizer.zero_grad()
                 
             optim_step_time_m.update(time.time() - optim_step_start)
@@ -277,8 +395,9 @@ def train_one_epoch(
             step += 1
             
             if USE_XLA:
-                global_loss_tensor_item = global_loss_tensor_reduced_detached.cpu().item() # stuck here for 32 cores
-                # global_loss_tensor_item = -0.8888
+                # global_loss_tensor_item = global_loss_tensor_reduced_detached.cpu().item() # stuck here for 32 cores
+                global_loss_tensor_item = -0.8888
+                # global_loss_tensor_item = global_loss_tensor.item() 
             else:
                 global_loss_tensor_item = global_loss_tensor_item
             if is_master(args):
@@ -319,8 +438,12 @@ def train_one_epoch(
                     else:
                         losses_m.update(global_loss_tensor_item, batch_size)
                     
-                    samples_per_second = inputs.numel() * args.world_size / batch_time_m.val
+                    
                     samples_per_second_per_gpu = inputs.numel() / batch_time_m.val
+                    if USE_NXD:
+                        samples_per_second = samples_per_second_per_gpu * int(parallel_state.get_data_parallel_size())
+                    else:
+                        samples_per_second = inputs.numel() * args.world_size / batch_time_m.val
                     loss_str = f"Loss: {losses_m.avg:.3f}"
                     loss_str += f" LB-Loss: {load_balancing_losses_m.avg:.3f}" if args.moe_freq > 0 else ""
                     logging.info(
@@ -389,10 +512,10 @@ def train_one_epoch(
                     if averagers is not None and args.log_avg_model_training_loss:
                         for k in averagers.avgs_dict.keys():
                             losses_avg_m[k].reset()
-                            
-            def _print_empty():
-                return
-            xm.add_step_closure(_print_empty)
+            # xm.master_print(f"Print out result time: {time.time() - end} at iter {i}, ", "P"*100)
+            # def _print_empty():
+            #     return
+            # xm.add_step_closure(_print_empty)
             if step >= total_steps:
                 xm.mark_step()
                 logging.warning(f"step: {step} has reached/exceeded total_steps: {total_steps}. ending training.")
@@ -443,7 +566,7 @@ def train_one_epoch(
             
             (texts,) = batch
             if USE_XLA:
-                texts = torch.LongTensor(texts.to('cpu')) # extra step to eliminate a torch bug
+                # texts = torch.LongTensor(texts.to('cpu')) # extra step to eliminate a torch bug
                 texts = texts.to(device)
             else:
                 texts = torch.LongTensor(texts).to(device)
@@ -467,6 +590,8 @@ def train_one_epoch(
                     if args.log_logit_mean:
                         logit_m.update(torch.mean(out).item())
                     total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
+                    if USE_NXD:
+                        total_lm_loss = torch.mean(total_lm_loss)
                     # print("total_lm_loss: ", total_lm_loss, "LMLOSS"*100 )
 
                     total_loss = total_lm_loss
@@ -475,8 +600,7 @@ def train_one_epoch(
                         clear_load_balancing_loss()
                         total_loss += total_load_balancing_loss
 
-                if USE_NXD:
-                    total_loss = torch.mean(total_loss)
+
                 backward_start = time.time()
                 backward(total_loss, scaler)
                 backward_time_m.update(time.time() - backward_start)
@@ -775,4 +899,6 @@ def train_one_epoch(
     # end for
     if tb_writer is not None:
         tb_writer.flush()
+        
+    xm.mark_step()
     return True, step
