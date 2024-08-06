@@ -1212,14 +1212,15 @@ if __name__ == "__main__":
     if args.dist_backend=="xla":
         
         from torch_neuronx.experimental import profiler
-        import torch_xla.debug.profiler as xp
+        # import torch_xla.debug.profiler as xp
+        from contextlib import nullcontext
 
-        with profiler.profile(
-            port=9012,
-            neuron_tensorboard_plugin_dir='logs_neuron/plugins/neuron',
-            profile_type='trace',
-            ms_duration=1500000 ) as profiler:
-    
+        # with profiler.profile(
+        #     port=9012,
+        #     neuron_tensorboard_plugin_dir='logs_neuron/plugins/neuron',
+        #     profile_type='trace',
+        #     ms_duration=1500000 ) as profiler:
+        with nullcontext():
             if os.environ.get("WORLD_SIZE"):
                 args.world_group = dist.init_process_group("xla")
                 _mp_fn(0, args)

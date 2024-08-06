@@ -141,7 +141,8 @@ def train_one_epoch(
         
         for i, batch in enumerate(dataloader):
             # with xp.StepTrace("data_loading", step_num=50):
-            with xp.Trace("data_loading"):
+            # with xp.Trace("data_loading"):
+            with nullcontext():
                 if not args.skip_scheduler:
                     scheduler(step)
                 
@@ -158,7 +159,8 @@ def train_one_epoch(
                 # xm.master_print(f"Convert data time: {convert_data_time - get_data_time} at iter {i}, ", "C"*100)
                 data_time_m.update(time.time() - end)
             # with xp.StepTrace("optimizer zero grad", step_num=50):   
-            with xp.Trace("optimizer zero grad"):
+            # with xp.Trace("optimizer zero grad"):
+            with nullcontext():
                 optimizer.zero_grad()
         
             if args.accum_freq == 1:
@@ -168,7 +170,8 @@ def train_one_epoch(
                     forward_start = time.time()
                     inputs, targets = sample_chunk(texts, args)
                     # with xp.StepTrace("forward step", step_num=50): 
-                    with xp.Trace("forward step"):
+                    # with xp.Trace("forward step"):
+                    with nullcontext():
                         out, _, _ = model(inputs)
                     forward_time_m.update(time.time() - forward_start)
 
@@ -183,7 +186,8 @@ def train_one_epoch(
                         clear_load_balancing_loss()
                         total_loss += total_load_balancing_loss
                 # with xp.StepTrace("backward step", step_num=50): 
-                with xp.Trace("backward step"):
+                # with xp.Trace("backward step"):
+                with nullcontext():
                     if USE_NXD:
                         total_loss = torch.mean(total_loss)
                     backward_start = time.time()
@@ -192,7 +196,7 @@ def train_one_epoch(
                 if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                     with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                         using_te and args.use_fp8
-                    ) else autocast() if not USE_XLA else torch.autocast("xla"):
+                    ) else autocast() if not USE_XLA else nullcontext():
                         for key, averager in averagers.avgs_dict.items():
                             with torch.no_grad():
                                 out_avg, _, _ = averager.av_model(inputs)
@@ -217,7 +221,7 @@ def train_one_epoch(
                     with maybe_no_sync():
                         with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                             using_te and args.use_fp8
-                        ) else autocast() if not USE_XLA else torch.autocast("xla"):
+                        ) else autocast() if not USE_XLA else nullcontext():
                             forward_start = time.time()
                             inputs_ii = inputs[ii * per_batch : (ii + 1) * per_batch]
                             if inputs_ii.shape[0] == 0:
@@ -250,7 +254,7 @@ def train_one_epoch(
                         backward_total_time += time.time() - backward_start
                         with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                             using_te and args.use_fp8
-                        ) else autocast() if not USE_XLA else torch.autocast("xla"):
+                        ) else autocast() if not USE_XLA else nullcontext():
                             if (
                                 averagers is not None
                                 and args.log_avg_model_training_loss
@@ -359,8 +363,8 @@ def train_one_epoch(
                       
             optim_step_start = time.time()
             
-            # with xp.StepTrace("optimizer step", num_step=50): 
-            with xp.Trace("optimizer step"): 
+            # with xp.Trace("optimizer step"): 
+            with nullcontext():
                 if scaler is not None:
                     if args.grad_clip_norm is not None:
                         scaler.unscale_(optimizer)
