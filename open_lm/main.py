@@ -1094,6 +1094,7 @@ def main(args):
                     wandb.log({name: val, "step": global_step, "tokens": end_of_epoch_log["tokens"]})
 
         if USE_XLA and COMPILE_MODEL:
+            print("Debug: Disable the save checkpoint")
             pass
         else:
             # print(f"Epoch1: {epoch}, rank: {args.rank} ", "E"*100)

@@ -177,8 +177,11 @@ def train_one_epoch(
 
                     if args.log_logit_mean:
                         logit_m.update(torch.mean(out).item())
-                    total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
-                    # print("total_lm_loss: ", total_lm_loss, "LMLOSS"*100 )
+                    if USE_NXD:
+                        total_lm_loss = loss(out.reshape(-1, out.size(-1)), targets.reshape(-1))
+                    else:
+                        total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
+                    
 
                     total_loss = total_lm_loss
                     if args.moe_freq > 0:
@@ -201,7 +204,10 @@ def train_one_epoch(
                             with torch.no_grad():
                                 out_avg, _, _ = averager.av_model(inputs)
                                 # save the loss for the average model for logging
-                                total_loss_avg[key] = loss(out_avg.reshape(-1, args.vocab_size), targets.reshape(-1))
+                                if USE_NXD:
+                                    total_loss_avg[key] = loss(out_avg.reshape(-1, out_avg.size(-1)), targets.reshape(-1))
+                                else:
+                                    total_loss_avg[key] = loss(out_avg.reshape(-1, args.vocab_size), targets.reshape(-1))
             else:
                 # raise Exception("TODO: accum_freq>1 on AWS Neuron is implemented yet.")
                 # split up batch into accum_freq chunks -- if you have --batch-size 8 and --accum-freq 4
@@ -233,12 +239,18 @@ def train_one_epoch(
 
                             if args.log_logit_mean:
                                 logit_m.update(torch.mean(out).item())
-
-                            local_lm_loss = (
-                                loss(out.reshape(-1, args.vocab_size), targets_ii.reshape(-1))
-                                * inputs_ii.shape[0]
-                                / inputs.shape[0]
-                            )
+                            if USE_NXD:
+                                local_lm_loss = (
+                                    loss(out.reshape(-1, out.size(-1)), targets_ii.reshape(-1))
+                                    * inputs_ii.shape[0]
+                                    / inputs.shape[0]
+                                )
+                            else:
+                                local_lm_loss = (
+                                    loss(out.reshape(-1, args.vocab_size), targets_ii.reshape(-1))
+                                    * inputs_ii.shape[0]
+                                    / inputs.shape[0]
+                                )
                             if USE_NXD:
                                 local_lm_loss = torch.mean(local_lm_loss)
                         local_loss = local_lm_loss
@@ -265,7 +277,7 @@ def train_one_epoch(
                                         out_avg, _, _ = averager.av_model(inputs_ii)
                                         if USE_NXD:
                                             local_avg_losses[key] = (
-                                                torch.mean(loss(out_avg.reshape(-1, args.vocab_size), targets_ii.reshape(-1)))
+                                                torch.mean(loss(out_avg.reshape(-1, out_avg.size(-1)), targets_ii.reshape(-1)))
                                                 * inputs_ii.shape[0]
                                                 / inputs.shape[0]
                                             )
@@ -314,7 +326,7 @@ def train_one_epoch(
                     total_loss_avg[key] = value.detach().clone()
             
             sync_start = time.time()
-            ##### xm.mark_step()
+            xm.mark_step()
             # if USE_XLA:
             #     do_sync_flag = True
             #     # do_sync_flag = False

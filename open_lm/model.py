@@ -471,8 +471,8 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
                 params.dim, 
                 params.vocab_size,
                 bias=False,
-                gather_output=True
-                # gather_output=False # has to be True
+                # gather_output=True
+                gather_output=False # has to be True if not change reshape in the train.py
             ).to('xla')
             # print("self.norm", type(self.norm), "N"*100)
             # self.output = RowParallelLinear( # slow
@@ -533,10 +533,9 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
         if past_key_values[0] is None:
             past_key_values = None
         x = self.norm(x)
-        # print(type(self.norm), "norm"*100)
 
         output = self.output(x)
-        # print(self.output.weight.shape,"X5"*100)
+
         # follow llama in casting this to float.
         return output.float(), x, past_key_values
 
