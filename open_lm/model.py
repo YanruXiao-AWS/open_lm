@@ -176,7 +176,6 @@ class CustomAttn(nn.Module):
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
         
-        # if True or USE_NXD:
         if USE_NXD:
             self.in_proj = ColumnParallelLinear(args.dim, 
                                                 3 * args.n_heads * self.head_dim, 
@@ -186,8 +185,6 @@ class CustomAttn(nn.Module):
                                               args.dim, 
                                               bias=False,
                                               input_is_parallel=True).to(args.te_device)
-            
-
         else: 
             self.in_proj = args.linear_type(args.dim, 3 * args.n_heads * self.head_dim, bias=False, device=args.te_device)
             self.out_proj = args.linear_type(args.n_heads * self.head_dim, args.dim, bias=False, device=args.te_device)
@@ -241,7 +238,7 @@ class CustomAttn(nn.Module):
     def forward(self, x: torch.Tensor, is_causal=True, past_key_value=None, use_cache=False, attention_mask=None):
         batchsize, q_len, _ = x.shape
         queries, keys, vals = self.in_proj(x).chunk(3, dim=-1)
-        # print("queries shape", self.in_proj(x).shape, "SHAPE"*100)
+
         queries = self.q_norm(queries)
         keys = self.k_norm(keys)
 
@@ -441,14 +438,13 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-        # if True or USE_NXD:
+
         if USE_NXD:
             self.tok_embeddings = ParallelEmbedding(
                 num_embeddings=params.vocab_size,
                 embedding_dim=params.dim
             )
         else:
-            print("Disabled ParallelEmbedding for debug")
             self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
         self.layers = torch.nn.ModuleList()
@@ -465,22 +461,14 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             params.dim,
             eps=params.norm_eps,
         )
-        # if True or USE_NXD:
+
         if USE_NXD:
             self.output = ColumnParallelLinear(
                 params.dim, 
                 params.vocab_size,
                 bias=False,
-                # gather_output=True
-                gather_output=False # has to be True if not change reshape in the train.py
+                gather_output=False 
             ).to('xla')
-            # print("self.norm", type(self.norm), "N"*100)
-            # self.output = RowParallelLinear( # slow
-            #     params.dim, 
-            #     params.vocab_size,
-            #     bias=False,
-            #     input_is_parallel=False,
-            # ).to('xla')
         else:
             self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
             

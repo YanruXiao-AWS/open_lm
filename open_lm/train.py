@@ -98,9 +98,6 @@ def train_one_epoch(
             As such, the number of steps in an "epoch" can vary, and we have to keep track of steps separately.
     """
     device = torch.device(args.device)
-    # if use_xla:
-    #     autocast = torch.autocast('xla')
-    # else:
     autocast = get_autocast(args.precision)
 
     model.train()
@@ -113,8 +110,6 @@ def train_one_epoch(
     num_batches_per_epoch = dataloader.num_batches
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
 
-    # print("dataloader.num_batches: ", dataloader.num_batches(), "NUMBATCH"*100)
-    # print("dataloader num_samples: ", dataloader.num_samples(), "num_samples"*100)
     losses_m = AverageMeter()
     load_balancing_losses_m = AverageMeter()
     batch_time_m = AverageMeter()
@@ -140,28 +135,19 @@ def train_one_epoch(
         
         
         for i, batch in enumerate(dataloader):
-            # with xp.StepTrace("data_loading", step_num=50):
-            # with xp.Trace("data_loading"):
-            with nullcontext():
-                if not args.skip_scheduler:
-                    scheduler(step)
-                
-                get_data_time = time.time()
-                # xm.master_print(f"Get data time: {get_data_time - end} at iter {i}, ", "G"*100)
-                (texts,) = batch
-                
-                if USE_XLA:
-                    # texts = torch.LongTensor(texts.to('cpu')) # extra step to eliminate a torch bug
-                    texts = texts.to(device)
-                else:
-                    texts = torch.LongTensor(texts).to(device)
-                convert_data_time = time.time()
-                # xm.master_print(f"Convert data time: {convert_data_time - get_data_time} at iter {i}, ", "C"*100)
-                data_time_m.update(time.time() - end)
-            # with xp.StepTrace("optimizer zero grad", step_num=50):   
-            # with xp.Trace("optimizer zero grad"):
-            with nullcontext():
-                optimizer.zero_grad()
+            
+            if not args.skip_scheduler:
+                scheduler(step)
+            (texts,) = batch
+            
+            if USE_XLA:
+                texts = texts.to(device)
+            else:
+                texts = torch.LongTensor(texts).to(device)
+
+            data_time_m.update(time.time() - end)
+
+            optimizer.zero_grad()
         
             if args.accum_freq == 1:
                 with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
@@ -169,10 +155,9 @@ def train_one_epoch(
                 ) else autocast() if not USE_XLA else nullcontext(): #torch.autocast("xla"):
                     forward_start = time.time()
                     inputs, targets = sample_chunk(texts, args)
-                    # with xp.StepTrace("forward step", step_num=50): 
-                    # with xp.Trace("forward step"):
-                    with nullcontext():
-                        out, _, _ = model(inputs)
+
+                    out, _, _ = model(inputs)
+                    
                     forward_time_m.update(time.time() - forward_start)
 
                     if args.log_logit_mean:
@@ -188,14 +173,13 @@ def train_one_epoch(
                         total_load_balancing_loss = batched_load_balancing_loss(moe_args)
                         clear_load_balancing_loss()
                         total_loss += total_load_balancing_loss
-                # with xp.StepTrace("backward step", step_num=50): 
-                # with xp.Trace("backward step"):
-                with nullcontext():
-                    if USE_NXD:
-                        total_loss = torch.mean(total_loss)
-                    backward_start = time.time()
-                    backward(total_loss, scaler)
-                    backward_time_m.update(time.time() - backward_start)
+
+
+                if USE_NXD:
+                    total_loss = torch.mean(total_loss)
+                backward_start = time.time()
+                backward(total_loss, scaler)
+                backward_time_m.update(time.time() - backward_start)
                 if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                     with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                         using_te and args.use_fp8
@@ -258,8 +242,7 @@ def train_one_epoch(
                             local_load_balancing_loss = batched_load_balancing_loss(moe_args)
                             clear_load_balancing_loss()
                             local_loss += local_load_balancing_loss
-                        # if USE_NXD:
-                        #     local_loss = torch.mean(local_loss)
+
                         backward_start = time.time()
                         # print("Local_loss, scaler:", local_loss, scaler, "L"*100)
                         backward(local_loss, scaler)
@@ -327,48 +310,49 @@ def train_one_epoch(
             
             sync_start = time.time()
             xm.mark_step()
-            # if USE_XLA:
-            #     do_sync_flag = True
-            #     # do_sync_flag = False
-            #     if not do_sync_flag and i == 0:
-            #         xm.master_print("do_sync_flag set to False. Not do all_reduce -for profiling.")
-            #     if do_sync_flag and args.world_size > 1 :
-            #         if USE_NXD:
-            #             xm.mark_step()            
-            #             # DP-only mode will trigger an error. - no confirmed reason. 
-            #             global_loss_tensor /= args.world_size # for avg
-            #             global_loss_tensor_reduced = xm.all_reduce(
-            #                 xm.REDUCE_SUM, 
-            #                 global_loss_tensor,
-            #                 groups=parallel_state.get_data_parallel_group(as_list=True))
+            # print(f"global_loss_tensor.item() {global_loss_tensor.item()} on rank {args.rank}" )
+            if USE_XLA:
+                do_sync_flag = True
+                # do_sync_flag = False
+                if not do_sync_flag and i == 0:
+                    xm.master_print("do_sync_flag set to False. Not do all_reduce -for profiling.")
+                if do_sync_flag and args.world_size > 1 :
+                    if USE_NXD:
+                        xm.mark_step()            
+                        # DP-only mode will trigger an error. - no confirmed reason. 
+                        global_loss_tensor /= args.world_size # for avg
+                        global_loss_tensor_reduced = xm.all_reduce(
+                            xm.REDUCE_SUM, 
+                            global_loss_tensor,
+                            groups=parallel_state.get_data_parallel_group(as_list=True))
                         
-            #             global_loss_tensor_reduced_detached = global_loss_tensor_reduced.detach()
-            #             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
-            #                 for key, value in total_loss_avg.items():
-            #                     total_loss_avg[key] /= args.world_size # for avg
-            #                     total_loss_avg[key] = xm.all_reduce(
-            #                         xm.REDUCE_SUM, 
-            #                         value, 
-            #                         groups=parallel_state.get_data_parallel_group(as_list=True))
+                        global_loss_tensor_reduced_detached = global_loss_tensor_reduced.detach()
+                        if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
+                            for key, value in total_loss_avg.items():
+                                total_loss_avg[key] /= args.world_size # for avg
+                                total_loss_avg[key] = xm.all_reduce(
+                                    xm.REDUCE_SUM, 
+                                    value, 
+                                    groups=parallel_state.get_data_parallel_group(as_list=True))
                                 
-            #             if args.moe_freq > 0:
-            #                 total_load_balancing_loss /= args.world_size # for avg
-            #                 total_load_balancing_loss = xm.all_reduce(
-            #                     xm.REDUCE_SUM, 
-            #                     total_load_balancing_loss,
-            #                     groups=parallel_state.get_data_parallel_group(as_list=True))
+                        if args.moe_freq > 0:
+                            total_load_balancing_loss /= args.world_size # for avg
+                            total_load_balancing_loss = xm.all_reduce(
+                                xm.REDUCE_SUM, 
+                                total_load_balancing_loss,
+                                groups=parallel_state.get_data_parallel_group(as_list=True))
                             
 
 
-            # else:
-            #     if args.world_size > 1:
+            else:
+                if args.world_size > 1:
 
-            #         dist.all_reduce(global_loss_tensor, op=ReduceOp.AVG)
-            #         if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
-            #             for key, value in total_loss_avg.items():
-            #                 dist.all_reduce(value, op=ReduceOp.AVG)
-            #         if args.moe_freq > 0:
-            #             dist.all_reduce(total_load_balancing_loss, op=ReduceOp.AVG)
+                    dist.all_reduce(global_loss_tensor, op=ReduceOp.AVG)
+                    if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
+                        for key, value in total_loss_avg.items():
+                            dist.all_reduce(value, op=ReduceOp.AVG)
+                    if args.moe_freq > 0:
+                        dist.all_reduce(total_load_balancing_loss, op=ReduceOp.AVG)
             sync_time_m.update(time.time() - sync_start)
 
             
@@ -389,16 +373,26 @@ def train_one_epoch(
                             model.clip_grad_norm_(args.grad_clip_norm, norm_type=2.0)
                         else:
                             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                    
-                    optimizer.step()
-                
-                # if USE_NXD:
-                #     # print("Use xm optimizer step")
-                #     xm.optimizer_step(
-                #         optimizer,
-                #         groups=parallel_state.get_data_parallel_group(as_list=True)
-                #     )
+                    USE_xla_step = True
+                    if USE_xla_step and USE_NXD:
+                        xm.optimizer_step(
+                            optimizer,
+                            groups=parallel_state.get_data_parallel_group(as_list=True)
+                        )
+                    else:
+                        optimizer.step()
+                        
+                    # if i > 0:
+                    #     for name, param in reversed(list(model.named_parameters())):
+                    #         if param.requires_grad:
+                    #             grad_first = param.grad[0, :4].cpu().numpy()
+                    #             # grad_first = target_cls.grad[0][:10].item()
+                    #             if args.rank<=2:
+                    #                 print(f"Check grad. Iter: {i} on rank: {args.rank}, Grad: {grad_first},", "CG"*50)
+                    #             break
+                        
                 optimizer.zero_grad()
+                
                 
             optim_step_time_m.update(time.time() - optim_step_start)
 
@@ -412,8 +406,8 @@ def train_one_epoch(
             
             if USE_XLA:
                 # global_loss_tensor_item = global_loss_tensor_reduced_detached.cpu().item() # stuck here for 32 cores
-                global_loss_tensor_item = -0.8888
-                # global_loss_tensor_item = global_loss_tensor.item() 
+                # global_loss_tensor_item = -0.8888
+                global_loss_tensor_item = global_loss_tensor.item() 
             else:
                 global_loss_tensor_item = global_loss_tensor_item
             if is_master(args):
@@ -736,7 +730,7 @@ def train_one_epoch(
                         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
                 
                 if args.dist_backend=="xla":
-                    if USE_NXD:
+                    if False and USE_NXD:
                             xm.optimizer_step(
                                 optimizer,
                                 groups=parallel_state.get_data_parallel_group(as_list=True)

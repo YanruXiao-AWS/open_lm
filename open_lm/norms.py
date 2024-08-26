@@ -181,9 +181,7 @@ class RmsNorm(nn.Module):
 def get_norm_class(model_norm, use_fp8=False):
     if USE_NXD:
         if model_norm == "default_layer_norm":
-            # print("NXD Layer Norm used in function", "NXDFFF"*100)
             return layer_norm.LayerNorm
-        
         else:
             raise ValueError(f"Unsupported model-norm by Neuron Device: {model_norm}")
     else:

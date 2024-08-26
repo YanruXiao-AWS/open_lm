@@ -71,12 +71,12 @@ try:
     import torch_xla.distributed.parallel_loader as pl
     import torch_xla.distributed.xla_multiprocessing as xmp
     import torch_xla.distributed.xla_backend
-    
+    # os.environ['XLA_USE_BF16'] = "1"
     USE_XLA = True
 except:
     USE_XLA = False
     pass
-# os.environ["NEURON_USE_EAGER_DEBUG_MODE"] = "1" # set to eager mode
+
 
 try:
     from neuronx_distributed import parallel_layers
@@ -329,7 +329,6 @@ def save_checkpoint(
                                                 path)    
 
                         else:
-                            # print(f"Mark1: , rank: {args.rank} ", "M"*100)
                             if completed_epoch == args.epochs:
                                 pass
                             else:
@@ -338,7 +337,6 @@ def save_checkpoint(
                                     path,
                                 )
 
-                            # print(f"Mark2: , rank: {args.rank} ", "M"*100)
                     else:
                         print("Compile model manually enabled in main.py. No save checkpoint.", "W"*100)
                 else:
@@ -362,7 +360,8 @@ def cleanup(sync_process, distributed=False):
 
 
 def main(args):
-    # args = parse_args(args) # comment for XLA-test
+    if not USE_XLA:
+        args = parse_args(args) 
 
     requires_training = args.train_data or args.dataset_type == "synthetic" or args.dataset_manifest is not None
 
@@ -482,12 +481,8 @@ def main(args):
         if args.distributed:
             # sync found checkpoint path to all ranks
             if args.dist_backend=="xla":
-                # For testing
                 if is_master(args):
                     pass
-                    # print("resume_from: ", resume_from, "AAA"*30)
-                    # print("device type: ", device, 'DDDD' * 25)
-                # resume_from = broadcast_object(args, resume_from)
                 pass
             else:
                 resume_from = broadcast_object(args, resume_from)
@@ -552,48 +547,10 @@ def main(args):
     else:
         # Optional: Use meta device
         if args.dist_backend=="xla":
-            
-            # nxd_config = nxd.neuronx_distributed_config(
-            #     tensor_parallel_size=args.tensor_parallel_size,
-            #     # optimizer_config={"zero_one_enabled": flags.use_zero_1, "grad_clipping": True, "max_grad_norm": 1.0},
-            #     # sequence_parallel=flags.sequence_parallel_enabled,
-            #     # activation_checkpoint_config=CoreAttention if flags.selective_checkpoint_enabled else "full",
-            #     model_init_config=None,
-            #     # mixed_precision_config=mixed_precision_config,
-            # )
-
-            # model = nxd.initialize_parallel_model(nxd_config, create_model, args, None)
-            # model.vocab_size = model.local_module().vocab_size
-            # model.seq_len = model.local_module().seq_len
-            
             model = create_model(args, None)
-            # model = model.to(torch.bfloat16)
-            
             nxd.utils.model_utils.move_model_to_device(
                 model, 
                 args.device)
-            
-            # try:
-            #     import math
-            #     import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
-            #     def get_and_move_model_sequential(device, model, num_workers_per_step=11):
-            #         local_rank = xm.get_local_ordinal()
-            #         local_world_size = neuronx_dist_utils.get_local_world_size()
-            #         for worker in range(math.ceil(local_world_size / num_workers_per_step)):
-            #             if local_rank // num_workers_per_step == worker:
-            #                 # model = get_model()
-            #                 model = create_model(args, None)
-            #                 nxd.utils.model_utils.move_model_to_device(model, device)
-            #             xm.rendezvous("get_and_move_model_sequential" + str(worker))
-            #         return model
-                
-            #     model = get_and_move_model_sequential(xm.xla_device(), model, 11)
-            #     # print("MODEL MOVED", "M"*100)
-            #     # parallel_layers.move_model_to_device(model, device)
-            # except Exception as e:
-            #     print("Found error:", e)
-            #     exit()
-            #     model = model.to(args.device)
         else:
             with torch.device("meta" if args.experimental_meta_device and args.fsdp else args.device):
                 model = create_model(args, tensor_parallel_group)
@@ -693,8 +650,7 @@ def main(args):
                 # this doesn't exist in older PyTorch, arg only added if enabled
                 ddp_args["static_graph"] = True
             if args.dist_backend=="xla":
-                model = model.to(device) # skip
-                # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
+                model = model.to(device) # skip ddp wrapper
             else:
                 model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
             
@@ -773,32 +729,35 @@ def main(args):
         params = [p for n, p in named_parameters if p.requires_grad]
         
         if USE_NXD:
-            optimizer = optim.AdamW(
-                [
-                    {"params": no_decay_params, "weight_decay": 0.0},
-                    {"params": params, "weight_decay": args.wd},
-                ],
-                lr=args.lr,
-                betas=(args.beta1, args.beta2),
-                eps=args.eps,
-            )
-            
-            # from neuronx_distributed.optimizer import NeuronZero1Optimizer
-            # optimizer_grouped_parameters = \
-            #     [
-            #         {"params": no_decay_params, "weight_decay": 0.0},
-            #         {"params": params, "weight_decay": args.wd},
-            #     ]
-            
-            # # Testing only - NxD wrapped Zero1Optimizer
-            # optimizer = NeuronZero1Optimizer(
-            #     optimizer_grouped_parameters,
-            #     optim.AdamW,
-            #     lr=args.lr,
-            #     pin_layout=False,
-            #     sharding_groups=parallel_state.get_data_parallel_group(as_list=True),
-            #     grad_norm_groups=parallel_state.get_tensor_model_parallel_group(as_list=True),
-            # )
+            USE_ZERO1 = False
+            if USE_ZERO1:
+                print("USE ZERO1 optimizer (in main.py)")
+                optimizer_grouped_parameters = \
+                    [
+                        {"params": no_decay_params, "weight_decay": 0.0},
+                        {"params": params, "weight_decay": args.wd},
+                    ]
+                from neuronx_distributed.utils.adamw_fp32_optim_params import AdamW_FP32OptimParams
+                from neuronx_distributed.optimizer import NeuronZero1Optimizer
+                optimizer = NeuronZero1Optimizer(
+                    optimizer_grouped_parameters,
+                    # AdamW_FP32OptimParams,
+                    optim.AdamW,
+                    lr=args.lr,
+                    pin_layout=False,
+                    sharding_groups=parallel_state.get_data_parallel_group(as_list=True),
+                    grad_norm_groups=parallel_state.get_tensor_model_parallel_group(as_list=True),
+                )
+            else:
+                optimizer = optim.AdamW(
+                    [
+                        {"params": no_decay_params, "weight_decay": 0.0},
+                        {"params": params, "weight_decay": args.wd},
+                    ],
+                    lr=args.lr,
+                    betas=(args.beta1, args.beta2),
+                    eps=args.eps,
+                )
             
         else:
             optimizer = optim.AdamW(
@@ -827,8 +786,9 @@ def main(args):
     )
     
     if USE_XLA:
-        data["train"].web_dataloader = data["train"].dataloader
-    
+        data["train"].ori_dataloader = data["train"].dataloader
+        if args.val_data is not None:
+            data["val_data"].ori_dataloader = data["val_data"].dataloader
 
     if args.target_mask_left is not None:
         # tokens handled with same modulo in dataloading
@@ -979,7 +939,6 @@ def main(args):
                 args, True, epoch, force_num_samples=num_samples_per_source, data_key=args.data_key, floor=True
             )
         
-        # print("Epoch: ", epoch, "E"*100)
             
         if args.dist_backend=="xla":
             class MpDeviceLoader(pl.MpDeviceLoader):
@@ -987,18 +946,11 @@ def main(args):
                     super().__init__(loader, device, **kwargs)
                     self.num_batches = self._loader.num_batches
                     self.num_samples = self._loader.num_samples
-            if NO_DP:
-                pass
-            else:
-                                
-                # print("loader: ", data["train"].dataloader, "L"*100)
-                # print("loader: ", data["train"].web_dataloader, "WL"*100)
+                    
+            data["train"].dataloader = MpDeviceLoader(data["train"].ori_dataloader, device)
+            if args.val_data is not None:
+                data["val_data"].dataloader = MpDeviceLoader(data["val_data"].ori_dataloader, device)
                 
-                data["train"].dataloader = MpDeviceLoader(data["train"].web_dataloader, device)
-
-                if args.val_data is not None:
-                    data["val_data"].dataloader = MpDeviceLoader(data["val_data"].dataloader, device)
-                # xm.rendezvous("wait_for_everyone_to_reach")
 
         prev_step = global_step
         if is_master(args):
@@ -1129,7 +1081,7 @@ def main(args):
 
     if args.wandb and is_master(args):
         wandb.finish()
-    # print(f"Epoch3: {epoch}, rank: {args.rank} ", "E"*100)
+
     # run a final sync.
     if remote_sync_process is not None:
         logging.info("Final remote sync.")
@@ -1144,23 +1096,19 @@ def main(args):
             logging.info("Final remote sync successful.")
         else:
             logging.info("Final remote sync failed.")
-    # print(f"Epoch4: {epoch}, rank: {args.rank}", "E"*100)
+
     # # Final sync of all procs.
     if args.dist_backend=="xla":
         xm.rendezvous("Final sync")
-        # if args.distributed:
-        #     dist.barrier()
     else:
         if args.distributed:
             dist.barrier()
 
         
-
-
     cleanup(remote_sync_process, args.distributed)
-    print(f"Epoch5: {epoch}, rank: {args.rank}", "E"*100)
-    xm.rendezvous("wait_for_everyone_to_reach")
-    # xm.mark_step()
+    if args.dist_backend=="xla":
+        xm.rendezvous("wait_for_everyone_to_reach")
+
     return args
 
 
@@ -1182,20 +1130,18 @@ def copy_codebase(args):
 
 def _mp_fn(index, args):
 
-        
-    # pass
     parallel_state.initialize_model_parallel(
-        tensor_model_parallel_size=args.tensor_parallel_size,
-                                            )
+        tensor_model_parallel_size=args.tensor_parallel_size)
+
     args.data_parallel_size = parallel_state.get_data_parallel_size()    
+    print("parallel_state.get_data_parallel_group(as_list=True):", \
+        parallel_state.get_data_parallel_group(as_list=True), "G"*100)
     if COMPILE_MODEL:
         # No log report to
         args.name = "open_lm_ex_trn_compile"
         args.report_to = ""
         
 
-        
-    # with xp.Trace("all steps"):
     main(args)
     # xm.rendezvous("_mp_fn finished")
     return 
@@ -1203,34 +1149,18 @@ def _mp_fn(index, args):
 # _mp_fn = main
 
 if __name__ == "__main__":
-    # main(sys.argv[1:])
-    args = parse_args(sys.argv[1:])
-    global NO_DP
-    NO_DP = False
-    if NO_DP:
-        print("Disable DP, Find it in main.py", "NODP"*100)
-    # print(sys.argv[1:])
-    if args.dist_backend=="xla":
-        
-        from torch_neuronx.experimental import profiler
-        # import torch_xla.debug.profiler as xp
-        from contextlib import nullcontext
 
-        # with profiler.profile(
-        #     port=9012,
-        #     neuron_tensorboard_plugin_dir='logs_neuron/plugins/neuron',
-        #     profile_type='trace',
-        #     ms_duration=1500000 ) as profiler:
-        with nullcontext():
-            if os.environ.get("WORLD_SIZE"):
-                args.world_group = dist.init_process_group("xla")
-                _mp_fn(0, args)
-            else:
-                print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
-                xmp.spawn(_mp_fn, args=(args,))
-            
-        # args.world_group = dist.init_process_group('xla')
-        # xmp.spawn(_mp_fn, args=(args,))
+    args = parse_args(sys.argv[1:])
+
+    if args.dist_backend=="xla":
+    
+        if os.environ.get("WORLD_SIZE"):
+            args.world_group = dist.init_process_group("xla")
+            _mp_fn(0, args)
+        else:
+            print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
+            xmp.spawn(_mp_fn, args=(args,))
+
         
     else:
         # cuda
