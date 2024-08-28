@@ -133,7 +133,6 @@ def train_one_epoch(
         #     if USE_XLA:
         #         raise Exception("TODO: MoE Behaviour on AWS Neuron is undefined. ")
         
-        
         for i, batch in enumerate(dataloader):
             
             if not args.skip_scheduler:
@@ -244,7 +243,6 @@ def train_one_epoch(
                             local_loss += local_load_balancing_loss
 
                         backward_start = time.time()
-                        # print("Local_loss, scaler:", local_loss, scaler, "L"*100)
                         backward(local_loss, scaler)
                         backward_total_time += time.time() - backward_start
                         with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
@@ -309,18 +307,17 @@ def train_one_epoch(
                     total_loss_avg[key] = value.detach().clone()
             
             sync_start = time.time()
-            xm.mark_step()
-            # print(f"global_loss_tensor.item() {global_loss_tensor.item()} on rank {args.rank}" )
+
             if USE_XLA:
                 do_sync_flag = True
-                # do_sync_flag = False
                 if not do_sync_flag and i == 0:
                     xm.master_print("do_sync_flag set to False. Not do all_reduce -for profiling.")
-                if do_sync_flag and args.world_size > 1 :
+                dp_size = parallel_state.get_data_parallel_size()
+                if do_sync_flag and dp_size > 1 :
                     if USE_NXD:
                         xm.mark_step()            
                         # DP-only mode will trigger an error. - no confirmed reason. 
-                        global_loss_tensor /= args.world_size # for avg
+                        global_loss_tensor /= dp_size # for avg
                         global_loss_tensor_reduced = xm.all_reduce(
                             xm.REDUCE_SUM, 
                             global_loss_tensor,
@@ -329,7 +326,7 @@ def train_one_epoch(
                         global_loss_tensor_reduced_detached = global_loss_tensor_reduced.detach()
                         if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                             for key, value in total_loss_avg.items():
-                                total_loss_avg[key] /= args.world_size # for avg
+                                total_loss_avg[key] /= dp_size # for avg
                                 total_loss_avg[key] = xm.all_reduce(
                                     xm.REDUCE_SUM, 
                                     value, 
@@ -341,9 +338,6 @@ def train_one_epoch(
                                 xm.REDUCE_SUM, 
                                 total_load_balancing_loss,
                                 groups=parallel_state.get_data_parallel_group(as_list=True))
-                            
-
-
             else:
                 if args.world_size > 1:
 
@@ -359,40 +353,29 @@ def train_one_epoch(
                       
             optim_step_start = time.time()
             
-            # with xp.Trace("optimizer step"): 
-            with nullcontext():
-                if scaler is not None:
-                    if args.grad_clip_norm is not None:
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    if args.grad_clip_norm is not None:
-                        if isinstance(model, FSDP):
-                            model.clip_grad_norm_(args.grad_clip_norm, norm_type=2.0)
-                        else:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
-                    USE_xla_step = True
-                    if USE_xla_step and USE_NXD:
-                        xm.optimizer_step(
-                            optimizer,
-                            groups=parallel_state.get_data_parallel_group(as_list=True)
-                        )
+
+            if scaler is not None:
+                if args.grad_clip_norm is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                if args.grad_clip_norm is not None:
+                    if isinstance(model, FSDP):
+                        model.clip_grad_norm_(args.grad_clip_norm, norm_type=2.0)
                     else:
-                        optimizer.step()
-                        
-                    # if i > 0:
-                    #     for name, param in reversed(list(model.named_parameters())):
-                    #         if param.requires_grad:
-                    #             grad_first = param.grad[0, :4].cpu().numpy()
-                    #             # grad_first = target_cls.grad[0][:10].item()
-                    #             if args.rank<=2:
-                    #                 print(f"Check grad. Iter: {i} on rank: {args.rank}, Grad: {grad_first},", "CG"*50)
-                    #             break
-                        
-                optimizer.zero_grad()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                USE_xla_step = True
+                if USE_xla_step and USE_NXD:
+                    xm.optimizer_step(
+                        optimizer,
+                        groups=parallel_state.get_data_parallel_group(as_list=True)
+                    )
+                else:
+                    optimizer.step()
                 
+            optimizer.zero_grad()
                 
             optim_step_time_m.update(time.time() - optim_step_start)
 
@@ -405,14 +388,12 @@ def train_one_epoch(
             step += 1
             
             if USE_XLA:
-                # global_loss_tensor_item = global_loss_tensor_reduced_detached.cpu().item() # stuck here for 32 cores
-                # global_loss_tensor_item = -0.8888
-                global_loss_tensor_item = global_loss_tensor.item() 
+                global_loss_tensor_item = global_loss_tensor_reduced_detached.cpu().item() 
             else:
                 global_loss_tensor_item = global_loss_tensor_item
             if is_master(args):
                 batch_size = len(inputs)
-                # print("INput shape: ", texts.shape, "S"*100)
+
                 # update the loss meter with the global loss tensor every iteration, so that the logging is of the avg of loss of the last
                 # args.log_every_n_steps iterations
                 
@@ -421,12 +402,7 @@ def train_one_epoch(
                     losses_m.update(global_loss_tensor_item - total_load_balancing_loss.item(), batch_size)
                     load_balancing_losses_m.update(total_load_balancing_loss.item(), batch_size)
                 else:
-                    
-                    if USE_XLA:
-                        # print("LOSS BEFORE:", global_loss_tensor.item(), batch_size, type(global_loss_tensor),"BEFORE"*100)
-                        losses_m.update(global_loss_tensor_item, batch_size) # line of code where issue is; first call
-                    else:
-                        losses_m.update(global_loss_tensor_item, batch_size) 
+                    losses_m.update(global_loss_tensor_item, batch_size) 
                 
                 if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
                     for key, value in total_loss_avg.items():
@@ -522,10 +498,7 @@ def train_one_epoch(
                     if averagers is not None and args.log_avg_model_training_loss:
                         for k in averagers.avgs_dict.keys():
                             losses_avg_m[k].reset()
-            # xm.master_print(f"Print out result time: {time.time() - end} at iter {i}, ", "P"*100)
-            # def _print_empty():
-            #     return
-            # xm.add_step_closure(_print_empty)
+
             if step >= total_steps:
                 xm.mark_step()
                 logging.warning(f"step: {step} has reached/exceeded total_steps: {total_steps}. ending training.")
@@ -584,10 +557,6 @@ def train_one_epoch(
             data_time_m.update(time.time() - end)
             optimizer.zero_grad()
             
-            if is_master(args):
-                # print("rank, i, batch", args.rank, i, texts.shape, "D"*100)
-                pass
-            # print("args.accum_freq", args.accum_freq, "FREQ"*100)
             if args.accum_freq == 1:
                 with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=data_parallel_group) if (
                     using_te and args.use_fp8
@@ -602,7 +571,7 @@ def train_one_epoch(
                     total_lm_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
                     if USE_NXD:
                         total_lm_loss = torch.mean(total_lm_loss)
-                    # print("total_lm_loss: ", total_lm_loss, "LMLOSS"*100 )
+
 
                     total_loss = total_lm_loss
                     if args.moe_freq > 0:
@@ -746,8 +715,6 @@ def train_one_epoch(
 
             if USE_NXD:
                 global_loss_tensor = total_loss.detach().clone()
-                # print("LOSS: ", global_loss_tensor, "GLT"*100 )
-                # xm.mark_step()
             else:
                 global_loss_tensor = total_loss.detach().clone()
             if averagers is not None and args.log_avg_model_training_loss and i % args.log_avg_model_training_loss == 0:
@@ -809,7 +776,6 @@ def train_one_epoch(
                 else:
                     
                     if USE_XLA:
-                        # print("LOSS BEFORE:", global_loss_tensor.item(), batch_size, type(global_loss_tensor),"BEFORE"*100)
                         losses_m.update(global_loss_tensor.item(), batch_size) # line of code where issue is; first call
                     else:
                         losses_m.update(global_loss_tensor.item(), batch_size) 

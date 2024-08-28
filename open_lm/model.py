@@ -218,10 +218,10 @@ class CustomAttn(nn.Module):
         if USE_NXD:
             # update the number of head and dim, as we shard tensor using TP. 
             tp_size = parallel_state.get_tensor_model_parallel_size()
-            # print("tp_size: ", tp_size, "TPSIZE"*100)
+
             self.n_heads = args.n_heads // tp_size
             self.dim = args.dim // tp_size
-            # print("n_heads, dim: ", self.n_heads, self.dim, "DIM"*100)
+
         
         self.reset_parameters()
 

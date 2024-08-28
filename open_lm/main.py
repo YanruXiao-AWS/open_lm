@@ -87,12 +87,9 @@ try:
     )
     import neuronx_distributed as nxd
     USE_NXD = True
-    # USE_NXD = False
-    # print("USE_NXD is manually set to false in main.py")
+
 except:
     USE_NXD = False
-    # print("NXD is not being used", "NXDOFF" *100)
-    # exit()
     pass
 
 
@@ -319,26 +316,16 @@ def save_checkpoint(
                 path = os.path.join(save_path, f"{prefix}{completed_epoch}.pt")
                 print(f"Saving {prefix}{completed_epoch} in {path}...")
                 if args.dist_backend=="xla":
-                    # print(os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None), 'GRAPH'*100)
-                    # if not os.environ.get("NEURON_EXTRACT_GRAPHS_ONLY", None): # Do not save checkpoint during pre-compile
                     
                     if not COMPILE_MODEL:
-                        if False and USE_NXD:
-                            print("path: ", path, "P"*100)
-                            parallel_layers.save(prefixes[prefix],
-                                                path)    
-
+                        if completed_epoch == args.epochs:
+                            pass
                         else:
-                            if completed_epoch == args.epochs:
-                                pass
-                            else:
-                                xm.save(
-                                    prefixes[prefix],
-                                    path,
-                                )
+                            xm.save(
+                                prefixes[prefix],
+                                path,
+                            )
 
-                    else:
-                        print("Compile model manually enabled in main.py. No save checkpoint.", "W"*100)
                 else:
                     torch.save(
                         prefixes[prefix],
@@ -360,8 +347,8 @@ def cleanup(sync_process, distributed=False):
 
 
 def main(args):
-    if not USE_XLA:
-        args = parse_args(args) 
+    # if not USE_XLA:
+    #     args = parse_args(args) 
 
     requires_training = args.train_data or args.dataset_type == "synthetic" or args.dataset_manifest is not None
 
@@ -987,7 +974,6 @@ def main(args):
         steps_done_epoch = global_step - prev_step
         samples_seen = samples_seen + steps_done_epoch * args.global_batch_size
 
-        # print("global_step: ", done_training, steps_done_epoch, global_step, prev_step, "S"*500)
         
         if not success:
             logging.info("Training exiting due to NaN value")
@@ -1049,7 +1035,6 @@ def main(args):
             print("Debug: Disable the save checkpoint")
             pass
         else:
-            # print(f"Epoch1: {epoch}, rank: {args.rank} ", "E"*100)
             # Saving checkpoints.
             save_checkpoint(
                 args,
@@ -1134,10 +1119,8 @@ def _mp_fn(index, args):
         tensor_model_parallel_size=args.tensor_parallel_size)
 
     args.data_parallel_size = parallel_state.get_data_parallel_size()    
-    print("parallel_state.get_data_parallel_group(as_list=True):", \
-        parallel_state.get_data_parallel_group(as_list=True), "G"*100)
     if COMPILE_MODEL:
-        # No log report to
+        # No log report to when compile
         args.name = "open_lm_ex_trn_compile"
         args.report_to = ""
         
@@ -1158,7 +1141,6 @@ if __name__ == "__main__":
             args.world_group = dist.init_process_group("xla")
             _mp_fn(0, args)
         else:
-            print("WORLD SIZE: ", os.environ.get("WORLD_SIZE"), "W"*1000)
             xmp.spawn(_mp_fn, args=(args,))
 
         
